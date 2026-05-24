@@ -1,0 +1,46 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: uv sync --all-groups
+
+      - name: Get CustomTkinter path
+        id: ctk
+        run: |
+          $path = uv run python -c "import customtkinter, os; print(os.path.dirname(customtkinter.__file__))"
+          echo "path=$path" >> $env:GITHUB_OUTPUT
+
+      - name: Build exe
+        run: |
+          uv run pyinstaller `
+            --noconfirm `
+            --onefile `
+            --windowed `
+            --name "Android TV Tools" `
+            --icon "assets\icon.ico" `
+            --add-data "assets;assets" `
+            --add-data "${{ steps.ctk.outputs.path }};customtkinter" `
+            android_tv_tools.py
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist\Android TV Tools.exe
+          generate_release_notes: true

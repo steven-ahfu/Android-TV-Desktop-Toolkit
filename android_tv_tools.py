@@ -1,0 +1,2045 @@
+import sys
+import shutil
+import webbrowser
+import customtkinter as ctk
+import subprocess
+import threading
+import os
+import socket
+import queue
+from pathlib import Path
+from tkinter import filedialog, StringVar
+import urllib.request
+import json as _json
+
+# ── paths ──────────────────────────────────────────────────────────────────────
+def _base_dir() -> Path:
+    """Resolves app root whether running as a script or a PyInstaller frozen exe."""
+    if getattr(sys, 'frozen', False):
+        return Path(sys.executable).parent
+    return Path(__file__).parent
+
+VERSION      = "4.1.0"
+
+SCRIPT_DIR   = _base_dir()
+BIN_DIR      = SCRIPT_DIR / "bin"
+DATA_DIR     = SCRIPT_DIR / "data"
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+def _find_adb() -> str:
+    # 1. User-saved preference from a previous session
+    pref_file = DATA_DIR / "adb_path.txt"
+    if pref_file.exists():
+        saved = pref_file.read_text().strip()
+        if saved and Path(saved).exists():
+            return saved
+    # 2. Bundled in bin/
+    bundled = BIN_DIR / "adb.exe"
+    if bundled.exists():
+        return str(bundled)
+    # 3. Common default install locations (Windows)
+    lappdata = os.environ.get("LOCALAPPDATA", "")
+    for candidate in [
+        Path(lappdata) / "Android/Sdk/platform-tools/adb.exe",
+        Path(os.environ.get("PROGRAMFILES", "")) / "Android/android-sdk/platform-tools/adb.exe",
+        Path(os.environ.get("PROGRAMFILES(X86)", "")) / "Android/android-sdk/platform-tools/adb.exe",
+        Path("C:/platform-tools/adb.exe"),
+    ]:
+        if candidate.exists():
+            return str(candidate)
+    # 4. PATH
+    return shutil.which("adb") or ""
+
+ADB = _find_adb()
+HISTORY_FILE   = DATA_DIR / "Device_history.txt"   # legacy flat-text (read-only compat)
+DEVICES_FILE   = DATA_DIR / "devices.json"          # new JSON store
+SHIZUKU_APK    = DATA_DIR / "shizuku.apk"
+SCREENSHOT_TMP = DATA_DIR / "_screenshot_tmp.png"
+
+# ── adb helpers ────────────────────────────────────────────────────────────────
+_LOG_FILE = DATA_DIR / "adb_calls.log"
+
+def _log_adb(args):
+    try:
+        from datetime import datetime
+        line = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}] adb {' '.join(args)}\n"
+        with open(_LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(line)
+    except Exception:
+        pass
+
+def adb(*args, serial=None, timeout=10):
+    if not ADB:
+        return "ERROR: ADB not configured"
+    cmd = [ADB]
+    if serial:
+        cmd += ["-s", serial]
+    cmd += list(args)
+    _log_adb(cmd[1:])
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
+                           creationflags=subprocess.CREATE_NO_WINDOW)
+        return (r.stdout + r.stderr).strip()
+    except subprocess.TimeoutExpired:
+        return "TIMEOUT"
+    except Exception as e:
+        return f"ERROR: {e}"
+
+def adb_out(*args, serial=None, timeout=10):
+    return adb(*args, serial=serial, timeout=timeout)
+
+# ── device history (JSON) ──────────────────────────────────────────────────────
+import re as _re
+import json as _json_hist
+from datetime import datetime as _dt
+
+_IP_RE = _re.compile(r'\b(\d{1,3}(?:\.\d{1,3}){3})\b')
+
+def load_history():
+    """Return dict keyed by IP: {label, port, last_seen}.
+    Reads devices.json if present, otherwise migrates legacy Device_history.txt."""
+    devices = {}
+    if DEVICES_FILE.exists():
+        try:
+            raw = _json_hist.loads(DEVICES_FILE.read_text(encoding="utf-8"))
+            # normalise older entries that may be plain strings
+            for ip, v in raw.items():
+                if isinstance(v, str):
+                    devices[ip] = {"label": v, "port": 5555, "last_seen": ""}
+                else:
+                    devices[ip] = v
+            return devices
+        except Exception:
+            pass
+    # migrate legacy flat-text file
+    if HISTORY_FILE.exists():
+        try:
+            for line in HISTORY_FILE.read_text(errors="replace").splitlines():
+                line = line.strip()
+                if not line or line.startswith("=") or ("Date" in line and "Time" in line):
+                    continue
+                m = _IP_RE.search(line)
+                if not m:
+                    continue
+                ip = m.group(1)
+                after = line[m.end():].strip()
+                devices[ip] = {"label": after or ip, "port": 5555, "last_seen": ""}
+        except Exception:
+            pass
+    return devices
+
+def save_history(ip, label, port=5555, touch_seen=True):
+    try:
+        devices = load_history()
+        entry = devices.get(ip, {"label": label, "port": port, "last_seen": ""})
+        entry["label"] = label or entry.get("label", ip)
+        entry["port"] = port
+        if touch_seen:
+            entry["last_seen"] = _dt.now().strftime("%Y-%m-%d %H:%M")
+        devices[ip] = entry
+        DEVICES_FILE.write_text(
+            _json_hist.dumps(devices, indent=2, ensure_ascii=False),
+            encoding="utf-8")
+    except Exception:
+        pass
+
+def delete_history(ip):
+    try:
+        devices = load_history()
+        devices.pop(ip, None)
+        DEVICES_FILE.write_text(
+            _json_hist.dumps(devices, indent=2, ensure_ascii=False),
+            encoding="utf-8")
+    except Exception:
+        pass
+
+def _last_seen_str(ts: str) -> str:
+    """Convert ISO timestamp to human-readable age string."""
+    if not ts:
+        return "never seen"
+    try:
+        delta = _dt.now() - _dt.strptime(ts, "%Y-%m-%d %H:%M")
+        minutes = int(delta.total_seconds() / 60)
+        if minutes < 2:    return "just now"
+        if minutes < 60:   return f"{minutes}m ago"
+        hours = minutes // 60
+        if hours < 24:     return f"{hours}h ago"
+        return f"{hours // 24}d ago"
+    except Exception:
+        return ""
+
+# ── network scan ───────────────────────────────────────────────────────────────
+def check_host(ip, port, result_queue):
+    try:
+        with socket.create_connection((ip, port), timeout=0.5):
+            result_queue.put((ip, port))
+    except Exception:
+        pass
+
+def scan_subnet(base="192.168.1", result_callback=None, done_callback=None):
+    """Scan subnet for port 5555 hits, then verify each is Android via ADB."""
+    q = queue.Queue()
+    threads = []
+    for i in range(1, 256):
+        ip = f"{base}.{i}"
+        t = threading.Thread(target=check_host, args=(ip, 5555, q), daemon=True)
+        t.start()
+        threads.append(t)
+
+    def collector():
+        for t in threads:
+            t.join()
+        hits = []
+        while not q.empty():
+            hits.append(q.get())
+
+        # verify each hit is actually an Android device
+        verified = []
+        for ip, port in hits:
+            serial = f"{ip}:{port}"
+            out = adb("connect", serial)
+            if "connected" in out.lower() or "already" in out.lower():
+                model = adb("shell", "getprop", "ro.product.model", serial=serial)
+                if model and not model.startswith("ERROR"):
+                    verified.append({"ip": ip, "port": port, "label": model.strip(), "verified": True})
+                    continue
+            verified.append({"ip": ip, "port": port, "label": "", "verified": False})
+
+        # also check mdns for wireless-debugging devices (Android 11+)
+        mdns = scan_mdns()
+        for entry in mdns:
+            if not any(v["ip"] == entry["ip"] for v in verified):
+                verified.append(entry)
+
+        if result_callback:
+            verified.sort(key=lambda x: [int(p) if p.isdigit() else 0 for p in x["ip"].split(".")])
+            result_callback(verified)
+        if done_callback:
+            done_callback()
+
+    threading.Thread(target=collector, daemon=True).start()
+
+def scan_mdns():
+    """Use 'adb mdns services' to find wireless-debugging devices on the LAN."""
+    results = []
+    if not ADB:
+        return results
+    try:
+        r = subprocess.run([ADB, "mdns", "services"], capture_output=True, text=True, timeout=5,
+                           creationflags=subprocess.CREATE_NO_WINDOW)
+        for line in (r.stdout + r.stderr).splitlines():
+            # format: <name>  _adb-tls-connect._tcp  <ip>:<port>
+            if "_adb-tls-connect" in line:
+                parts = line.split()
+                addr = parts[-1] if parts else ""
+                if ":" in addr:
+                    ip, port_s = addr.rsplit(":", 1)
+                    try:
+                        results.append({"ip": ip, "port": int(port_s),
+                                        "label": "(wireless debug)", "verified": True,
+                                        "wireless": True})
+                    except ValueError:
+                        pass
+    except Exception:
+        pass
+    return results
+
+# ── main app ───────────────────────────────────────────────────────────────────
+class App(ctk.CTk):
+    def __init__(self):
+        super().__init__()
+        ctk.set_appearance_mode("dark")
+        ctk.set_default_color_theme("blue")
+
+        self.title(f"Android TV Tools v{VERSION}")
+        self.geometry("1100x700")
+        self.minsize(900, 600)
+        _icon = SCRIPT_DIR / "assets" / "icon.ico"
+        if _icon.exists():
+            self.iconbitmap(str(_icon))
+
+        self.serial = None          # connected device serial (ip:5555)
+        self.history = load_history()
+
+        self._build_ui()
+        self._populate_device_list()
+        self._start_adb_server()
+
+    # ── UI build ───────────────────────────────────────────────────────────────
+    def _build_ui(self):
+        self.grid_columnconfigure(1, weight=1)
+        self.grid_rowconfigure(0, weight=1)
+
+        # ── left panel ─────────────────────────────────────────────────────────
+        left = ctk.CTkFrame(self, width=240, corner_radius=0)
+        left.grid(row=0, column=0, sticky="nsew")
+        left.grid_columnconfigure(0, weight=1)
+        left.grid_rowconfigure(4, weight=1)
+
+        ctk.CTkLabel(left, text="Devices", font=ctk.CTkFont(size=14, weight="bold")).grid(
+            row=0, column=0, padx=10, pady=(12, 4), sticky="w")
+
+        # subnet scan row
+        subnet_row = ctk.CTkFrame(left, fg_color="transparent")
+        subnet_row.grid(row=1, column=0, padx=8, pady=(0, 2), sticky="ew")
+        subnet_row.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(subnet_row, text="Subnet:", font=ctk.CTkFont(size=11),
+                     text_color="gray").grid(row=0, column=0, padx=(0, 4))
+        self._subnet_var = StringVar(value="192.168.1")
+        ctk.CTkEntry(subnet_row, textvariable=self._subnet_var,
+                     font=ctk.CTkFont(size=11), height=26).grid(row=0, column=1, sticky="ew")
+
+        scan_btn_row = ctk.CTkFrame(left, fg_color="transparent")
+        scan_btn_row.grid(row=2, column=0, padx=8, pady=2, sticky="ew")
+        scan_btn_row.grid_columnconfigure(0, weight=1)
+        self.scan_btn = ctk.CTkButton(scan_btn_row, text="Scan Network", height=30,
+                                      command=self._scan)
+        self.scan_btn.grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        ctk.CTkButton(scan_btn_row, text="mDNS", width=54, height=30,
+                      fg_color="gray40", command=self._scan_mdns).grid(row=0, column=1)
+
+        self.scan_status = ctk.CTkLabel(left, text="", text_color="gray", font=ctk.CTkFont(size=10))
+        self.scan_status.grid(row=3, column=0, padx=10, pady=0, sticky="w")
+
+        # device list
+        self.device_list = ctk.CTkScrollableFrame(left, label_text="")
+        self.device_list.grid(row=4, column=0, padx=6, pady=4, sticky="nsew")
+        self.device_list.grid_columnconfigure(0, weight=1)
+
+        # connect / disconnect
+        conn_row = ctk.CTkFrame(left, fg_color="transparent")
+        conn_row.grid(row=5, column=0, padx=8, pady=4, sticky="ew")
+        conn_row.grid_columnconfigure(0, weight=1)
+        self.connect_btn = ctk.CTkButton(conn_row, text="Connect", fg_color="green",
+                                         height=32, command=self._connect)
+        self.connect_btn.grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        self.disconnect_btn = ctk.CTkButton(conn_row, text="⏏", width=36, height=32,
+                                             fg_color="gray40", command=self._disconnect)
+        self.disconnect_btn.grid(row=0, column=1)
+
+        # manual IP entry
+        ctk.CTkFrame(left, height=1, fg_color="gray30").grid(
+            row=6, column=0, padx=10, pady=(2, 4), sticky="ew")
+        ctk.CTkLabel(left, text="Manual / Direct Connect",
+                     font=ctk.CTkFont(size=10), text_color="gray").grid(
+                     row=7, column=0, padx=10, pady=(0, 2), sticky="w")
+        manual_row = ctk.CTkFrame(left, fg_color="transparent")
+        manual_row.grid(row=8, column=0, padx=8, pady=(0, 2), sticky="ew")
+        manual_row.grid_columnconfigure(0, weight=1)
+        self._manual_ip_var = StringVar()
+        ctk.CTkEntry(manual_row, textvariable=self._manual_ip_var,
+                     placeholder_text="192.168.1.x", height=26,
+                     font=ctk.CTkFont(size=11)).grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        self._manual_port_var = StringVar(value="5555")
+        ctk.CTkEntry(manual_row, textvariable=self._manual_port_var,
+                     width=48, height=26, font=ctk.CTkFont(size=11)).grid(row=0, column=1)
+        ctk.CTkButton(left, text="Connect to IP", height=28,
+                      command=self._connect_manual).grid(
+                      row=9, column=0, padx=8, pady=(2, 2), sticky="ew")
+
+        # wireless debug pairing (Android 11+)
+        ctk.CTkButton(left, text="Pair (Android 11+ Wireless)", height=28,
+                      fg_color="#1a4a6a",
+                      command=self._open_pair_dialog).grid(
+                      row=10, column=0, padx=8, pady=(0, 10), sticky="ew")
+
+        self.selected_ip = StringVar(value="")
+        self._device_radio_buttons = []
+
+        # ── right panel ────────────────────────────────────────────────────────
+        right = ctk.CTkFrame(self, corner_radius=0)
+        right.grid(row=0, column=1, sticky="nsew")
+        right.grid_rowconfigure(1, weight=1)
+        right.grid_columnconfigure(0, weight=1)
+
+        # status bar top
+        self.status_label = ctk.CTkLabel(right, text="Not connected",
+                                          font=ctk.CTkFont(size=13, weight="bold"),
+                                          text_color="gray")
+        self.status_label.grid(row=0, column=0, padx=14, pady=(10, 2), sticky="w")
+
+        # tabs
+        self.tabs = ctk.CTkTabview(right)
+        self.tabs.grid(row=1, column=0, padx=8, pady=4, sticky="nsew")
+        for name in ("Info", "Packages", "Performance", "Install", "Settings", "Tools", "Media", "Remote", "Screenshot"):
+            self.tabs.add(name)
+
+        self._build_info_tab()
+        self._build_packages_tab()
+        self._build_performance_tab()
+        self._build_install_tab()
+        self._build_settings_tab()
+        self._build_tools_tab()
+        self._build_media_tab()
+        self._build_remote_tab()
+        self._build_screenshot_tab()
+
+        # log area
+        log_frame = ctk.CTkFrame(right, height=160, corner_radius=6)
+        log_frame.grid(row=2, column=0, padx=8, pady=(0, 8), sticky="ew")
+        log_frame.grid_columnconfigure(0, weight=1)
+        log_frame.grid_rowconfigure(1, weight=1)
+
+        log_header = ctk.CTkFrame(log_frame, fg_color="transparent")
+        log_header.grid(row=0, column=0, padx=8, pady=(4, 0), sticky="ew")
+        log_header.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(log_header, text="Output Log", font=ctk.CTkFont(size=11), text_color="gray").grid(row=0, column=0, sticky="w")
+        self.copy_btn = ctk.CTkButton(log_header, text="Copy", width=52, height=22,
+                                      font=ctk.CTkFont(size=11),
+                                      command=self._copy_log)
+        self.copy_btn.grid(row=0, column=1, padx=(0, 2))
+
+        self.log_box = ctk.CTkTextbox(log_frame, height=130, font=ctk.CTkFont(family="Consolas", size=11), state="disabled")
+        self.log_box.grid(row=1, column=0, padx=6, pady=(2, 6), sticky="ew")
+
+    def _build_info_tab(self):
+        tab = self.tabs.tab("Info")
+        tab.grid_columnconfigure(1, weight=1)
+
+        fields = [
+            ("Manufacturer", "info_manufacturer"),
+            ("Model", "info_model"),
+            ("Android Version", "info_android"),
+            ("Build / Firmware", "info_build"),
+            ("Serial Number", "info_serial"),
+            ("Resolution", "info_resolution"),
+            ("Battery", "info_battery"),
+            ("CPU ABI", "info_abi"),
+            ("DNS Mode", "info_dns"),
+            ("Package Verifier", "info_pkgverifier"),
+            ("Input Method", "info_ime"),
+        ]
+        for i, (label, attr) in enumerate(fields):
+            ctk.CTkLabel(tab, text=label + ":", anchor="e", width=140).grid(
+                row=i, column=0, padx=(10, 4), pady=5, sticky="e")
+            var = ctk.CTkLabel(tab, text="—", anchor="w")
+            var.grid(row=i, column=1, padx=4, pady=5, sticky="w")
+            setattr(self, attr, var)
+
+        ctk.CTkButton(tab, text="Refresh Info", command=self._refresh_info).grid(
+            row=len(fields), column=0, columnspan=2, padx=10, pady=12)
+
+    def _build_packages_tab(self):
+        import tkinter as tk
+        tab = self.tabs.tab("Packages")
+        tab.grid_columnconfigure(0, weight=1)
+        tab.grid_rowconfigure(1, weight=1)
+        tab.grid_rowconfigure(2, weight=0)
+
+        btn_row = ctk.CTkFrame(tab, fg_color="transparent")
+        btn_row.grid(row=0, column=0, sticky="ew", padx=4, pady=6)
+
+        ctk.CTkButton(btn_row, text="List System", width=110, command=lambda: self._list_packages("-s")).pack(side="left", padx=3)
+        ctk.CTkButton(btn_row, text="List All", width=100, command=lambda: self._list_packages("")).pack(side="left", padx=3)
+        ctk.CTkButton(btn_row, text="List Uninstalled", width=130, command=lambda: self._list_packages("-u")).pack(side="left", padx=3)
+        ctk.CTkButton(btn_row, text="Play Store", width=100, command=self._list_playstore_pkgs).pack(side="left", padx=3)
+        ctk.CTkButton(btn_row, text="Sideloaded", width=100, command=self._list_sideloaded_pkgs).pack(side="left", padx=3)
+
+        list_frame = ctk.CTkFrame(tab, corner_radius=6)
+        list_frame.grid(row=1, column=0, padx=6, pady=(0, 4), sticky="nsew")
+        list_frame.grid_columnconfigure(0, weight=1)
+        list_frame.grid_rowconfigure(0, weight=1)
+
+        scrollbar = tk.Scrollbar(list_frame, orient="vertical")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+
+        self.pkg_listbox = tk.Listbox(
+            list_frame, yscrollcommand=scrollbar.set, selectmode="single",
+            bg="#2b2b2b", fg="#dcdcdc", selectbackground="#1f6aa5", selectforeground="white",
+            font=("Consolas", 11), relief="flat", borderwidth=0, activestyle="none")
+        self.pkg_listbox.grid(row=0, column=0, sticky="nsew")
+        scrollbar.config(command=self.pkg_listbox.yview)
+
+        action_row = ctk.CTkFrame(tab, fg_color="transparent")
+        action_row.grid(row=2, column=0, sticky="ew", padx=4, pady=(0, 6))
+        ctk.CTkButton(action_row, text="Uninstall", width=100, fg_color="#8B0000",
+                      hover_color="#a00000", command=self._pkg_uninstall).pack(side="left", padx=3)
+        ctk.CTkButton(action_row, text="Disable", width=90,
+                      command=self._pkg_disable).pack(side="left", padx=3)
+        ctk.CTkButton(action_row, text="Enable", width=90,
+                      command=self._pkg_enable).pack(side="left", padx=3)
+        ctk.CTkButton(action_row, text="Get Version", width=100,
+                      command=self._pkg_version).pack(side="left", padx=3)
+        ctk.CTkButton(action_row, text="Clear Cache", width=100,
+                      command=self._pkg_clear_cache).pack(side="left", padx=3)
+        ctk.CTkButton(action_row, text="Clear Data", width=95, fg_color="#5a3000",
+                      hover_color="#7a4000", command=self._pkg_clear_data).pack(side="left", padx=3)
+
+    def _build_performance_tab(self):
+        tab = self.tabs.tab("Performance")
+
+        tab.grid_columnconfigure((0, 1), weight=1)
+
+        ctk.CTkLabel(tab, text="Performance Optimizations",
+                     font=ctk.CTkFont(size=13, weight="bold")).grid(
+                     row=0, column=0, columnspan=2, pady=(10, 2))
+        ctk.CTkLabel(tab, text="Note: Compile Speed Profile can take several minutes.",
+                     text_color="orange", font=ctk.CTkFont(size=11)).grid(
+                     row=1, column=0, columnspan=2, pady=(0, 8))
+
+        # left column
+        ctk.CTkButton(tab, text="Compile Speed Profile",
+                      command=self._compile_speed_profile, width=240).grid(row=2, column=0, padx=8, pady=5)
+        ctk.CTkButton(tab, text="Enable App Freezer",
+                      command=self._enable_freezer, width=240).grid(row=3, column=0, padx=8, pady=5)
+        ctk.CTkButton(tab, text="Optimize Touch Response",
+                      command=self._optimize_touch, width=240).grid(row=4, column=0, padx=8, pady=5)
+        ctk.CTkButton(tab, text="All Optimizations",
+                      fg_color="#1f6aa5", command=self._all_optimizations, width=240).grid(row=5, column=0, padx=8, pady=5)
+
+        # right column
+        ctk.CTkButton(tab, text="Speed Up Animations (0.5×)",
+                      command=lambda: self._set_animations("0.5"), width=240).grid(row=2, column=1, padx=8, pady=5)
+        ctk.CTkButton(tab, text="Disable Animations",
+                      command=lambda: self._set_animations("0"), width=240).grid(row=3, column=1, padx=8, pady=5)
+        ctk.CTkButton(tab, text="Reset Animations (1×)",
+                      command=lambda: self._set_animations("1"), width=240).grid(row=4, column=1, padx=8, pady=5)
+        ctk.CTkButton(tab, text="Clear All App Caches",
+                      command=self._clear_all_caches, width=240).grid(row=5, column=1, padx=8, pady=5)
+        ctk.CTkButton(tab, text="Kill Background Apps",
+                      command=self._kill_background_apps, width=240).grid(row=6, column=1, padx=8, pady=5)
+
+    def _build_install_tab(self):
+        tab = self.tabs.tab("Install")
+        tab.grid_columnconfigure(0, weight=1)
+
+        # APK install
+        apk_frame = ctk.CTkFrame(tab)
+        apk_frame.grid(row=0, column=0, padx=10, pady=10, sticky="ew")
+        apk_frame.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(apk_frame, text="Install APK", font=ctk.CTkFont(size=13, weight="bold")).grid(
+            row=0, column=0, columnspan=3, padx=10, pady=(8, 4), sticky="w")
+
+        self.apk_path_var = StringVar(value="No file selected")
+        ctk.CTkLabel(apk_frame, textvariable=self.apk_path_var, text_color="gray",
+                     font=ctk.CTkFont(size=11)).grid(row=1, column=0, columnspan=3, padx=10, pady=2, sticky="w")
+
+        ctk.CTkButton(apk_frame, text="Browse APK", command=self._browse_apk, width=120).grid(
+            row=2, column=0, padx=10, pady=4, sticky="w")
+        ctk.CTkButton(apk_frame, text="Install", fg_color="green", command=self._install_apk, width=120).grid(
+            row=2, column=1, padx=4, pady=4)
+        ctk.CTkButton(apk_frame, text="Bulk Install (Folder)", command=self._browse_bulk_folder, width=150).grid(
+            row=2, column=2, padx=10, pady=4, sticky="e")
+
+        # Shizuku
+        shiz_frame = ctk.CTkFrame(tab)
+        shiz_frame.grid(row=1, column=0, padx=10, pady=10, sticky="ew")
+
+        ctk.CTkLabel(shiz_frame, text="Shizuku", font=ctk.CTkFont(size=13, weight="bold")).grid(
+            row=0, column=0, columnspan=3, padx=10, pady=(8, 4), sticky="w")
+
+        self._shizuku_status_label = ctk.CTkLabel(shiz_frame, text="", text_color="gray",
+                                                   font=ctk.CTkFont(size=11))
+        self._shizuku_status_label.grid(row=1, column=0, columnspan=3, padx=10, pady=2, sticky="w")
+
+        apk_present = SHIZUKU_APK.exists()
+        self._shizuku_dl_btn = ctk.CTkButton(shiz_frame, text="Download Shizuku", width=160,
+                                              command=self._download_shizuku,
+                                              state="disabled" if apk_present else "normal")
+        self._shizuku_dl_btn.grid(row=2, column=0, padx=10, pady=6)
+        self._shizuku_install_btn = ctk.CTkButton(shiz_frame, text="Install Shizuku", width=160,
+                                                   command=self._install_shizuku,
+                                                   state="normal" if apk_present else "disabled")
+        self._shizuku_install_btn.grid(row=2, column=1, padx=6, pady=6)
+        ctk.CTkButton(shiz_frame, text="Launch Shizuku", command=self._launch_shizuku, width=160).grid(
+            row=2, column=2, padx=10, pady=6)
+
+        self._refresh_shizuku_status()
+
+        # Quick-install popular apps
+        qi_frame = ctk.CTkFrame(tab)
+        qi_frame.grid(row=2, column=0, padx=10, pady=(0, 10), sticky="ew")
+        ctk.CTkLabel(qi_frame, text="Quick Install Popular Apps",
+                     font=ctk.CTkFont(size=13, weight="bold")).grid(
+                     row=0, column=0, columnspan=3, padx=10, pady=(8, 4), sticky="w")
+
+        self._qi_apps = {
+            "AdGuard TV":       {"file": DATA_DIR / "adguard_tv.apk",
+                                 "repo": "AdguardTeam/AdguardForAndroidTV",
+                                 "asset_suffix": ".apk"},
+            "Aurora Store":     {"file": DATA_DIR / "aurora_store.apk",
+                                 "repo": "AuroraOSS/AuroraStore",
+                                 "asset_suffix": ".apk",
+                                 "gitlab": True},
+            "SmartTube Stable": {"file": DATA_DIR / "smarttube_stable.apk",
+                                 "repo": "yuliskov/SmartTube",
+                                 "asset_contains": "smarttube_stable"},
+            "SmartTube Beta":   {"file": DATA_DIR / "smarttube_beta.apk",
+                                 "repo": "yuliskov/SmartTube",
+                                 "asset_contains": "smarttube_beta"},
+        }
+
+        for i, (name, meta) in enumerate(self._qi_apps.items()):
+            ctk.CTkLabel(qi_frame, text=name, width=140,
+                         font=ctk.CTkFont(size=11)).grid(row=i+1, column=0, padx=(10, 4), pady=4, sticky="w")
+            present = meta["file"].exists()
+            dl_btn = ctk.CTkButton(qi_frame, text="Download", width=100,
+                                   state="disabled" if present else "normal",
+                                   command=lambda n=name: self._qi_download(n))
+            dl_btn.grid(row=i+1, column=1, padx=4, pady=4)
+            inst_btn = ctk.CTkButton(qi_frame, text="Install", width=80,
+                                     state="normal" if present else "disabled",
+                                     command=lambda n=name: self._qi_install(n))
+            inst_btn.grid(row=i+1, column=2, padx=4, pady=4)
+            meta["dl_btn"] = dl_btn
+            meta["inst_btn"] = inst_btn
+
+    def _build_settings_tab(self):
+        import tkinter as tk
+        tab = self.tabs.tab("Settings")
+        tab.grid_columnconfigure((0, 1), weight=1)
+
+        def section(text, row, col=0, span=1):
+            ctk.CTkLabel(tab, text=text, font=ctk.CTkFont(size=12, weight="bold"),
+                         text_color="gray").grid(row=row, column=col, columnspan=span,
+                         padx=10, pady=(12, 2), sticky="w")
+
+        def btn(text, cmd, row, col, w=200):
+            ctk.CTkButton(tab, text=text, width=w, command=cmd).grid(
+                row=row, column=col, padx=8, pady=3, sticky="w")
+
+        # ── Display ────────────────────────────────────────────────────────────
+        section("Display", 0)
+        rotation_opts = {"Portrait (0°)": "0", "Landscape (90°)": "1",
+                         "Reverse Portrait (180°)": "2", "Reverse Landscape (270°)": "3"}
+        self._rotation_var = ctk.StringVar(value="Portrait (0°)")
+        ctk.CTkLabel(tab, text="Rotate Screen:", font=ctk.CTkFont(size=11)).grid(
+            row=1, column=0, padx=(10, 0), pady=3, sticky="w")
+        rot_row = ctk.CTkFrame(tab, fg_color="transparent")
+        rot_row.grid(row=1, column=0, padx=8, pady=3, sticky="ew")
+        ctk.CTkOptionMenu(rot_row, values=list(rotation_opts.keys()),
+                          variable=self._rotation_var, width=200).pack(side="left", padx=(110, 4))
+        ctk.CTkButton(rot_row, text="Apply", width=60,
+                      command=lambda: self._set_rotation(rotation_opts[self._rotation_var.get()])).pack(side="left")
+
+        timeout_opts = {"30 seconds": "30000", "1 minute": "60000", "2 minutes": "120000",
+                        "5 minutes": "300000", "10 minutes": "600000", "Never": "2147483647"}
+        self._timeout_var = ctk.StringVar(value="5 minutes")
+        ctk.CTkLabel(tab, text="Screen Timeout:", font=ctk.CTkFont(size=11)).grid(
+            row=2, column=0, padx=(10, 0), pady=3, sticky="w")
+        to_row = ctk.CTkFrame(tab, fg_color="transparent")
+        to_row.grid(row=2, column=0, padx=8, pady=3, sticky="ew")
+        ctk.CTkOptionMenu(to_row, values=list(timeout_opts.keys()),
+                          variable=self._timeout_var, width=200).pack(side="left", padx=(110, 4))
+        ctk.CTkButton(to_row, text="Apply", width=60,
+                      command=lambda: self._set_screen_timeout(timeout_opts[self._timeout_var.get()])).pack(side="left")
+
+        density_row = ctk.CTkFrame(tab, fg_color="transparent")
+        density_row.grid(row=3, column=0, padx=8, pady=3, sticky="ew")
+        ctk.CTkLabel(density_row, text="Screen Density:", font=ctk.CTkFont(size=11)).pack(side="left", padx=(0, 6))
+        self._density_entry = ctk.CTkEntry(density_row, width=70, placeholder_text="320")
+        self._density_entry.pack(side="left", padx=(0, 4))
+        ctk.CTkButton(density_row, text="Apply", width=60,
+                      command=self._set_density).pack(side="left", padx=(0, 4))
+        ctk.CTkButton(density_row, text="Reset", width=60,
+                      command=self._reset_density).pack(side="left")
+
+        # ── Right column — toggles ─────────────────────────────────────────────
+        section("Developer Options", 0, col=1)
+        btn("Show Developer Options", self._dev_options_show, 1, 1)
+        btn("Hide Developer Options", self._dev_options_hide, 2, 1)
+
+        section("Location", 4, col=0)
+        btn("Enable GPS", self._gps_on, 5, 0)
+        btn("Disable GPS", self._gps_off, 6, 0)
+
+        section("Play Protect", 4, col=1)
+        btn("Enable Play Protect", self._play_protect_on, 5, 1)
+        btn("Disable Play Protect", self._play_protect_off, 6, 1)
+
+        section("Ambient Display", 7, col=0)
+        btn("Enable Ambient Display", self._ambient_on, 8, 0)
+        btn("Disable Ambient Display", self._ambient_off, 9, 0)
+
+        section("Date & Time", 7, col=1)
+        btn("Repair NTP Server", self._repair_ntp, 8, 1)
+
+    def _set_rotation(self, val):
+        if not self._require_connection():
+            return
+        def run():
+            adb("shell", "settings", "put", "system", "user_rotation", val, serial=self.serial)
+            self._log(f"Screen rotation set to {val}.")
+        threading.Thread(target=run, daemon=True).start()
+
+    def _set_screen_timeout(self, ms):
+        if not self._require_connection():
+            return
+        def run():
+            adb("shell", "settings", "put", "system", "screen_off_timeout", ms, serial=self.serial)
+            self._log(f"Screen timeout set to {ms}ms.")
+        threading.Thread(target=run, daemon=True).start()
+
+    def _set_density(self):
+        if not self._require_connection():
+            return
+        val = self._density_entry.get().strip()
+        if not val.isdigit():
+            self._log("Enter a numeric density value (e.g. 320).")
+            return
+        def run():
+            result = adb("shell", "wm", "density", val, serial=self.serial)
+            self._log(result or f"Density set to {val}.")
+        threading.Thread(target=run, daemon=True).start()
+
+    def _reset_density(self):
+        if not self._require_connection():
+            return
+        def run():
+            result = adb("shell", "wm", "density", "reset", serial=self.serial)
+            self._log(result or "Density reset to default.")
+        threading.Thread(target=run, daemon=True).start()
+
+    def _dev_options_show(self):
+        if not self._require_connection():
+            return
+        def run():
+            adb("shell", "settings", "put", "global", "development_settings_enabled", "1", serial=self.serial)
+            self._log("Developer options visible.")
+        threading.Thread(target=run, daemon=True).start()
+
+    def _dev_options_hide(self):
+        if not self._require_connection():
+            return
+        def run():
+            adb("shell", "settings", "put", "global", "development_settings_enabled", "0", serial=self.serial)
+            self._log("Developer options hidden.")
+        threading.Thread(target=run, daemon=True).start()
+
+    def _gps_on(self):
+        if not self._require_connection():
+            return
+        def run():
+            adb("shell", "settings", "put", "secure", "location_mode", "3", serial=self.serial)
+            self._log("GPS enabled.")
+        threading.Thread(target=run, daemon=True).start()
+
+    def _gps_off(self):
+        if not self._require_connection():
+            return
+        def run():
+            adb("shell", "settings", "put", "secure", "location_mode", "0", serial=self.serial)
+            self._log("GPS disabled.")
+        threading.Thread(target=run, daemon=True).start()
+
+    def _play_protect_on(self):
+        if not self._require_connection():
+            return
+        def run():
+            adb("shell", "settings", "put", "global", "package_verifier_enable", "1", serial=self.serial)
+            self._log("Play Protect enabled.")
+        threading.Thread(target=run, daemon=True).start()
+
+    def _play_protect_off(self):
+        if not self._require_connection():
+            return
+        def run():
+            adb("shell", "settings", "put", "global", "package_verifier_enable", "0", serial=self.serial)
+            self._log("Play Protect disabled.")
+        threading.Thread(target=run, daemon=True).start()
+
+    def _ambient_on(self):
+        if not self._require_connection():
+            return
+        def run():
+            adb("shell", "settings", "put", "secure", "doze_enabled", "1", serial=self.serial)
+            self._log("Ambient display enabled.")
+        threading.Thread(target=run, daemon=True).start()
+
+    def _ambient_off(self):
+        if not self._require_connection():
+            return
+        def run():
+            adb("shell", "settings", "put", "secure", "doze_enabled", "0", serial=self.serial)
+            self._log("Ambient display disabled.")
+        threading.Thread(target=run, daemon=True).start()
+
+    def _repair_ntp(self):
+        if not self._require_connection():
+            return
+        def run():
+            self._log("Setting NTP server to pool.ntp.org...")
+            adb("shell", "settings", "put", "global", "ntp_server", "pool.ntp.org", serial=self.serial)
+            adb("shell", "am", "broadcast", "-a", "android.intent.action.TIME_TICK", serial=self.serial)
+            self._log("NTP server updated.")
+        threading.Thread(target=run, daemon=True).start()
+
+    def _build_tools_tab(self):
+        tab = self.tabs.tab("Tools")
+        tab.grid_columnconfigure((0, 1, 2), weight=1)
+
+        # ── Power ──────────────────────────────────────────────────────────────
+        ctk.CTkLabel(tab, text="Power", font=ctk.CTkFont(size=12, weight="bold"),
+                     text_color="gray").grid(row=0, column=0, padx=8, pady=(10, 2), sticky="w")
+        ctk.CTkButton(tab, text="Wake Device", width=190,
+                      command=lambda: self._keyevent(224)).grid(row=1, column=0, padx=8, pady=3, sticky="w")
+        ctk.CTkButton(tab, text="Sleep / Stand-by", width=190,
+                      command=lambda: self._keyevent(223)).grid(row=2, column=0, padx=8, pady=3, sticky="w")
+        ctk.CTkButton(tab, text="Soft Reboot", width=190,
+                      command=self._reboot_soft).grid(row=3, column=0, padx=8, pady=3, sticky="w")
+        ctk.CTkButton(tab, text="Reboot to Recovery", width=190,
+                      command=self._reboot_recovery).grid(row=4, column=0, padx=8, pady=3, sticky="w")
+
+        # ── Navigation ─────────────────────────────────────────────────────────
+        ctk.CTkLabel(tab, text="Navigation", font=ctk.CTkFont(size=12, weight="bold"),
+                     text_color="gray").grid(row=0, column=1, padx=8, pady=(10, 2), sticky="w")
+        ctk.CTkButton(tab, text="Notification Curtain", width=190,
+                      command=self._notification_curtain).grid(row=1, column=1, padx=8, pady=3, sticky="w")
+        ctk.CTkButton(tab, text="Open Google Search (Weather)", width=190,
+                      command=self._google_search_weather).grid(row=2, column=1, padx=8, pady=3, sticky="w")
+        ctk.CTkButton(tab, text="Open System Updates", width=190,
+                      command=self._system_updates).grid(row=3, column=1, padx=8, pady=3, sticky="w")
+        ctk.CTkButton(tab, text="Disconnect All ADB", width=190,
+                      command=self._adb_disconnect_all).grid(row=4, column=1, padx=8, pady=3, sticky="w")
+
+        # ── Settings Shortcuts ─────────────────────────────────────────────────
+        ctk.CTkLabel(tab, text="Settings Shortcuts", font=ctk.CTkFont(size=12, weight="bold"),
+                     text_color="gray").grid(row=0, column=2, padx=8, pady=(10, 2), sticky="w")
+        for i, (label, action) in enumerate([
+            ("Display Settings",    "android.settings.DISPLAY_SETTINGS"),
+            ("Wi-Fi Settings",      "android.settings.WIFI_SETTINGS"),
+            ("Bluetooth Settings",  "android.settings.BLUETOOTH_SETTINGS"),
+            ("App Settings",        "android.settings.MANAGE_APPLICATIONS_SETTINGS"),
+            ("Developer Options",   "com.android.settings.APPLICATION_DEVELOPMENT_SETTINGS"),
+        ]):
+            a = action
+            ctk.CTkButton(tab, text=label, width=190,
+                          command=lambda act=a: self._open_settings(act)).grid(
+                          row=i + 1, column=2, padx=8, pady=3, sticky="w")
+
+        # ── Launch App ─────────────────────────────────────────────────────────
+        ctk.CTkLabel(tab, text="Launch App (package name)", font=ctk.CTkFont(size=12, weight="bold"),
+                     text_color="gray").grid(row=5, column=0, columnspan=2, padx=8, pady=(12, 2), sticky="w")
+        launch_row = ctk.CTkFrame(tab, fg_color="transparent")
+        launch_row.grid(row=6, column=0, columnspan=2, padx=8, pady=2, sticky="ew")
+        launch_row.grid_columnconfigure(0, weight=1)
+        self._launch_pkg_entry = ctk.CTkEntry(launch_row, placeholder_text="com.example.app")
+        self._launch_pkg_entry.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        self._launch_pkg_entry.bind("<Return>", lambda e: self._launch_app())
+        ctk.CTkButton(launch_row, text="Launch", width=80, command=self._launch_app).grid(row=0, column=1)
+
+        # ── Send Text ──────────────────────────────────────────────────────────
+        ctk.CTkLabel(tab, text="Send Text to Device", font=ctk.CTkFont(size=12, weight="bold"),
+                     text_color="gray").grid(row=7, column=0, columnspan=2, padx=8, pady=(10, 2), sticky="w")
+        send_row = ctk.CTkFrame(tab, fg_color="transparent")
+        send_row.grid(row=8, column=0, columnspan=2, padx=8, pady=2, sticky="ew")
+        send_row.grid_columnconfigure(0, weight=1)
+        self._send_text_entry = ctk.CTkEntry(send_row, placeholder_text="Type text to send...")
+        self._send_text_entry.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        self._send_text_entry.bind("<Return>", lambda e: self._send_text())
+        ctk.CTkButton(send_row, text="Send", width=70, command=self._send_text).grid(row=0, column=1)
+
+        # ── ADB Console ────────────────────────────────────────────────────────
+        ctk.CTkLabel(tab, text="ADB Console", font=ctk.CTkFont(size=12, weight="bold"),
+                     text_color="gray").grid(row=9, column=0, columnspan=3, padx=8, pady=(10, 2), sticky="w")
+        adb_row = ctk.CTkFrame(tab, fg_color="transparent")
+        adb_row.grid(row=10, column=0, columnspan=3, padx=8, pady=(2, 10), sticky="ew")
+        adb_row.grid_columnconfigure(0, weight=1)
+        self._adb_cmd_entry = ctk.CTkEntry(adb_row, placeholder_text="shell input keyevent 3   (omit 'adb')")
+        self._adb_cmd_entry.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        self._adb_cmd_entry.bind("<Return>", lambda e: self._run_adb_console())
+        ctk.CTkButton(adb_row, text="Run", width=60, command=self._run_adb_console).grid(row=0, column=1)
+
+    def _build_media_tab(self):
+        tab = self.tabs.tab("Media")
+        tab.grid_columnconfigure(0, weight=1)
+
+        # ── ScrCpy ─────────────────────────────────────────────────────────────
+        scrcpy_frame = ctk.CTkFrame(tab)
+        scrcpy_frame.grid(row=0, column=0, padx=10, pady=10, sticky="ew")
+        ctk.CTkLabel(scrcpy_frame, text="ScrCpy — View & Control",
+                     font=ctk.CTkFont(size=13, weight="bold")).pack(padx=10, pady=(8, 2), anchor="w")
+        ctk.CTkLabel(scrcpy_frame, text="Place scrcpy.exe in bin/ or install to PATH.",
+                     text_color="gray", font=ctk.CTkFont(size=11)).pack(padx=10, pady=(0, 4), anchor="w")
+        btn_row = ctk.CTkFrame(scrcpy_frame, fg_color="transparent")
+        btn_row.pack(padx=10, pady=(0, 8), anchor="w")
+        ctk.CTkButton(btn_row, text="Launch ScrCpy", width=150,
+                      command=self._launch_scrcpy).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(btn_row, text="Download ScrCpy", width=150, fg_color="gray40",
+                      command=lambda: webbrowser.open("https://github.com/Genymobile/scrcpy/releases/latest")).pack(side="left")
+
+        # ── Screen Recording ───────────────────────────────────────────────────
+        rec_frame = ctk.CTkFrame(tab)
+        rec_frame.grid(row=1, column=0, padx=10, pady=(0, 10), sticky="ew")
+        ctk.CTkLabel(rec_frame, text="Screen Recording",
+                     font=ctk.CTkFont(size=13, weight="bold")).pack(padx=10, pady=(8, 2), anchor="w")
+        self._rec_status = ctk.CTkLabel(rec_frame, text="Not recording.", text_color="gray",
+                                         font=ctk.CTkFont(size=11))
+        self._rec_status.pack(padx=10, pady=(0, 4), anchor="w")
+        rec_btn_row = ctk.CTkFrame(rec_frame, fg_color="transparent")
+        rec_btn_row.pack(padx=10, pady=(0, 8), anchor="w")
+        self._rec_start_btn = ctk.CTkButton(rec_btn_row, text="Start Recording", width=150,
+                                             fg_color="green", command=self._start_recording)
+        self._rec_start_btn.pack(side="left", padx=(0, 8))
+        self._rec_stop_btn = ctk.CTkButton(rec_btn_row, text="Stop & Pull", width=150,
+                                            state="disabled", command=self._stop_recording)
+        self._rec_stop_btn.pack(side="left")
+        self._recording = False
+
+        # ── File Transfer ──────────────────────────────────────────────────────
+        ft_frame = ctk.CTkFrame(tab)
+        ft_frame.grid(row=2, column=0, padx=10, pady=(0, 10), sticky="ew")
+        ft_frame.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(ft_frame, text="File Transfer",
+                     font=ctk.CTkFont(size=13, weight="bold")).grid(
+                     row=0, column=0, columnspan=3, padx=10, pady=(8, 4), sticky="w")
+
+        ctk.CTkLabel(ft_frame, text="Send file to /sdcard/:", font=ctk.CTkFont(size=11)).grid(
+            row=1, column=0, padx=10, pady=3, sticky="w")
+        push_row = ctk.CTkFrame(ft_frame, fg_color="transparent")
+        push_row.grid(row=2, column=0, padx=10, pady=(0, 6), sticky="ew")
+        push_row.grid_columnconfigure(0, weight=1)
+        self._push_path_var = ctk.StringVar(value="No file selected")
+        ctk.CTkLabel(push_row, textvariable=self._push_path_var, text_color="gray",
+                     font=ctk.CTkFont(size=11)).grid(row=0, column=0, sticky="w")
+        ctk.CTkButton(push_row, text="Browse", width=80,
+                      command=self._browse_push_file).grid(row=0, column=1, padx=(6, 4))
+        ctk.CTkButton(push_row, text="Send", width=70, fg_color="green",
+                      command=self._push_file).grid(row=0, column=2)
+
+        ctk.CTkLabel(ft_frame, text="Download file from device:", font=ctk.CTkFont(size=11)).grid(
+            row=3, column=0, padx=10, pady=(6, 3), sticky="w")
+        pull_row = ctk.CTkFrame(ft_frame, fg_color="transparent")
+        pull_row.grid(row=4, column=0, padx=10, pady=(0, 8), sticky="ew")
+        pull_row.grid_columnconfigure(0, weight=1)
+        self._pull_path_entry = ctk.CTkEntry(pull_row, placeholder_text="/sdcard/Download/file.mp4")
+        self._pull_path_entry.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        ctk.CTkButton(pull_row, text="Download", width=90,
+                      command=self._pull_file).grid(row=0, column=1)
+
+    def _launch_scrcpy(self):
+        if not self._require_connection():
+            return
+        scrcpy = shutil.which("scrcpy") or str(BIN_DIR / "scrcpy.exe")
+        if not Path(scrcpy).exists():
+            self._log("scrcpy not found. Download it and place scrcpy.exe in bin/.")
+            webbrowser.open("https://github.com/Genymobile/scrcpy/releases/latest")
+            return
+        try:
+            subprocess.Popen([scrcpy, "--serial", self.serial],
+                             creationflags=subprocess.CREATE_NO_WINDOW)
+            self._log("ScrCpy launched.")
+        except Exception as e:
+            self._log(f"Failed to launch scrcpy: {e}")
+
+    def _start_recording(self):
+        if not self._require_connection():
+            return
+        self._recording = True
+        self._rec_start_btn.configure(state="disabled")
+        self._rec_stop_btn.configure(state="normal")
+        self._rec_status.configure(text="Recording...", text_color="red")
+        def run():
+            adb("shell", "screenrecord", "--bit-rate", "4000000",
+                "/sdcard/_tv_tools_rec.mp4", serial=self.serial, timeout=600)
+        threading.Thread(target=run, daemon=True).start()
+
+    def _stop_recording(self):
+        if not self._require_connection():
+            return
+        self._recording = False
+        self._rec_start_btn.configure(state="normal")
+        self._rec_stop_btn.configure(state="disabled")
+        self._rec_status.configure(text="Stopping...", text_color="orange")
+        def run():
+            adb("shell", "pkill", "-INT", "screenrecord", serial=self.serial)
+            import time; time.sleep(1)
+            dest = filedialog.asksaveasfilename(
+                defaultextension=".mp4",
+                filetypes=[("MP4 video", "*.mp4"), ("All files", "*.*")],
+                initialfile="recording.mp4")
+            if dest:
+                self._log("Pulling recording...")
+                adb("pull", "/sdcard/_tv_tools_rec.mp4", dest, serial=self.serial, timeout=120)
+                self._log(f"Saved to {dest}")
+            adb("shell", "rm", "-f", "/sdcard/_tv_tools_rec.mp4", serial=self.serial)
+            self.after(0, lambda: self._rec_status.configure(text="Not recording.", text_color="gray"))
+        threading.Thread(target=run, daemon=True).start()
+
+    def _browse_push_file(self):
+        path = filedialog.askopenfilename(title="Select file to send")
+        if path:
+            self._push_path_var.set(path)
+            self._push_local_path = path
+
+    def _push_file(self):
+        if not self._require_connection():
+            return
+        path = getattr(self, "_push_local_path", None)
+        if not path or not os.path.exists(path):
+            self._log("No file selected.")
+            return
+        def run():
+            fname = os.path.basename(path)
+            self._log(f"Sending {fname} to /sdcard/...")
+            result = adb("push", path, f"/sdcard/{fname}", serial=self.serial, timeout=120)
+            self._log(result or "File sent.")
+        threading.Thread(target=run, daemon=True).start()
+
+    def _pull_file(self):
+        if not self._require_connection():
+            return
+        device_path = self._pull_path_entry.get().strip()
+        if not device_path:
+            self._log("Enter a device file path.")
+            return
+        dest_dir = filedialog.askdirectory(title="Select destination folder")
+        if not dest_dir:
+            return
+        def run():
+            self._log(f"Downloading {device_path}...")
+            result = adb("pull", device_path, dest_dir, serial=self.serial, timeout=120)
+            self._log(result or "File downloaded.")
+        threading.Thread(target=run, daemon=True).start()
+
+    def _build_remote_tab(self):
+        tab = self.tabs.tab("Remote")
+
+        ctk.CTkLabel(tab, text="Remote Control",
+                     font=ctk.CTkFont(size=13, weight="bold")).pack(pady=(10, 6))
+
+        grid = ctk.CTkFrame(tab)
+        grid.pack(pady=4)
+
+        def kb(text, code, row, col, w=80, h=44, color=None):
+            kw = {"width": w, "height": h, "command": lambda c=code: self._keyevent(c)}
+            if color:
+                kw["fg_color"] = color
+            ctk.CTkButton(grid, text=text, **kw).grid(row=row, column=col, padx=3, pady=3)
+
+        # Volume top row
+        kb("Vol+",   24, 0, 1)
+        kb("Mute",  164, 0, 2)
+
+        # D-pad + Vol
+        kb("⏮",   88, 1, 0)
+        kb("▲",   19, 1, 1)
+        kb("⏭",   87, 1, 2)
+        kb("Vol-",  25, 1, 3)
+
+        kb("◀",   21, 2, 0)
+        kb("OK",   23, 2, 1, color="#1f6aa5")
+        kb("▶",   22, 2, 2)
+
+        ctk.CTkFrame(grid, width=80, height=44, fg_color="transparent").grid(row=3, column=0, padx=3, pady=3)
+        kb("▼",   20, 3, 1)
+
+        # Nav row
+        kb("Back",   4, 4, 0)
+        kb("Home",   3, 4, 1)
+        kb("Menu",  82, 4, 2)
+
+        # Media row
+        kb("⏪",  88, 5, 0)
+        kb("⏯",  85, 5, 1)
+        kb("⏩",  87, 5, 2)
+
+        # Power row
+        kb("Power", 26, 6, 1, color="#5a0000")
+
+    def _build_screenshot_tab(self):
+        tab = self.tabs.tab("Screenshot")
+        tab.grid_columnconfigure(0, weight=1)
+        tab.grid_rowconfigure(1, weight=1)
+
+        btn_row = ctk.CTkFrame(tab, fg_color="transparent")
+        btn_row.grid(row=0, column=0, padx=10, pady=(10, 4), sticky="ew")
+
+        ctk.CTkButton(btn_row, text="Take Screenshot", width=150,
+                      command=self._take_screenshot).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(btn_row, text="Save As...", width=110,
+                      command=self._save_screenshot).pack(side="left", padx=(0, 8))
+        self._screenshot_label = ctk.CTkLabel(btn_row, text="No screenshot yet.",
+                                              text_color="gray", font=ctk.CTkFont(size=11))
+        self._screenshot_label.pack(side="left")
+
+        self._screenshot_canvas = ctk.CTkLabel(tab, text="", fg_color="#1a1a1a", corner_radius=6)
+        self._screenshot_canvas.grid(row=1, column=0, padx=10, pady=(0, 10), sticky="nsew")
+        self._screenshot_image = None  # holds PhotoImage reference
+
+    # ── device list ────────────────────────────────────────────────────────────
+    def _populate_device_list(self):
+        for w in self.device_list.winfo_children():
+            w.destroy()
+        self._device_radio_buttons.clear()
+
+        if not self.history:
+            ctk.CTkLabel(self.device_list, text="No devices.\nScan or add manually.",
+                         text_color="gray", font=ctk.CTkFont(size=10)).pack(pady=10)
+            return
+
+        for ip in sorted(self.history.keys(),
+                         key=lambda x: [int(p) if p.isdigit() else 0 for p in x.split(".")]):
+            meta  = self.history[ip]
+            label = meta.get("label", ip) if isinstance(meta, dict) else str(meta)
+            port  = meta.get("port", 5555) if isinstance(meta, dict) else 5555
+            seen  = _last_seen_str(meta.get("last_seen", "") if isinstance(meta, dict) else "")
+            verified = meta.get("verified", False) if isinstance(meta, dict) else False
+            wireless = meta.get("wireless", False) if isinstance(meta, dict) else False
+
+            row = ctk.CTkFrame(self.device_list, fg_color="transparent")
+            row.pack(fill="x", padx=2, pady=2)
+            row.grid_columnconfigure(0, weight=1)
+
+            dot = "🔵" if verified else "⚪"
+            suffix = " 📶" if wireless else ""
+            port_txt = f":{port}" if port != 5555 else ""
+            rb = ctk.CTkRadioButton(
+                row,
+                text=f"{dot} {ip}{port_txt}{suffix}\n    {label}\n    {seen}",
+                variable=self.selected_ip, value=ip,
+                font=ctk.CTkFont(size=10))
+            rb.grid(row=0, column=0, sticky="w")
+            self._device_radio_buttons.append(rb)
+
+            del_btn = ctk.CTkButton(row, text="×", width=22, height=22,
+                                    fg_color="transparent", hover_color="gray30",
+                                    font=ctk.CTkFont(size=13),
+                                    command=lambda i=ip: self._delete_device(i))
+            del_btn.grid(row=0, column=1, padx=(0, 2))
+
+    def _delete_device(self, ip):
+        delete_history(ip)
+        self.history.pop(ip, None)
+        self._populate_device_list()
+
+    def _add_discovered(self, devices):
+        """devices is a list of {ip, port, label, verified} dicts from scan_subnet."""
+        for d in devices:
+            ip = d["ip"]
+            existing = self.history.get(ip, {})
+            if not isinstance(existing, dict):
+                existing = {"label": str(existing), "port": 5555, "last_seen": ""}
+            label = d.get("label") or existing.get("label", ip)
+            port  = d.get("port", 5555)
+            # update history in memory and on disk
+            existing.update({"label": label, "port": port,
+                              "verified": d.get("verified", False),
+                              "wireless": d.get("wireless", False)})
+            self.history[ip] = existing
+            save_history(ip, label, port=port, touch_seen=False)
+        self.after(0, self._populate_device_list)
+
+    # ── actions ────────────────────────────────────────────────────────────────
+    def _start_adb_server(self):
+        def run():
+            if not ADB or adb("version").startswith("ERROR:"):
+                self.after(0, self._prompt_adb_path)
+                return
+            self._log("Starting ADB server...")
+            adb("kill-server")
+            adb("start-server")
+            ver = adb("version")
+            self._log(f"ADB ready: {ver.splitlines()[0]}")
+            self._probe_known_devices()
+        threading.Thread(target=run, daemon=True).start()
+
+    def _probe_known_devices(self):
+        """Silently check which history devices are reachable; update verified flag."""
+        devices = list(self.history.items())
+        if not devices:
+            return
+        self._log(f"Probing {len(devices)} known device(s)...")
+        reachable = []
+        probe_threads = []
+
+        def probe(ip, meta):
+            port = meta.get("port", 5555) if isinstance(meta, dict) else 5555
+            try:
+                with socket.create_connection((ip, port), timeout=1):
+                    serial = f"{ip}:{port}"
+                    out = adb("connect", serial)
+                    if "connected" in out.lower() or "already" in out.lower():
+                        reachable.append((ip, port))
+            except Exception:
+                pass
+
+        for ip, meta in devices:
+            t = threading.Thread(target=probe, args=(ip, meta), daemon=True)
+            t.start()
+            probe_threads.append(t)
+        for t in probe_threads:
+            t.join()
+
+        if reachable:
+            self._log(f"  Reachable: {', '.join(f'{ip}:{p}' for ip, p in reachable)}")
+            for ip, port in reachable:
+                meta = self.history.get(ip, {})
+                if isinstance(meta, dict):
+                    meta["verified"] = True
+            self.after(0, self._populate_device_list)
+
+    def _prompt_adb_path(self):
+        global ADB
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("ADB Not Found")
+        dialog.geometry("500x230")
+        dialog.resizable(False, False)
+        dialog.grab_set()
+        dialog.lift()
+
+        ctk.CTkLabel(dialog, text="Android Debug Bridge (ADB) could not be found.",
+                     font=ctk.CTkFont(size=13, weight="bold")).pack(pady=(20, 2), padx=20, anchor="w")
+        ctk.CTkLabel(dialog, text="ADB is required to communicate with your Android TV device.",
+                     text_color="gray").pack(padx=20, anchor="w")
+
+        link = ctk.CTkLabel(dialog, text="  → Download Android SDK Platform Tools",
+                            text_color="#4a9eff", cursor="hand2",
+                            font=ctk.CTkFont(size=12, underline=True))
+        link.pack(padx=20, pady=(6, 14), anchor="w")
+        link.bind("<Button-1>", lambda e: webbrowser.open(
+            "https://developer.android.com/tools/releases/platform-tools"))
+
+        path_row = ctk.CTkFrame(dialog, fg_color="transparent")
+        path_row.pack(fill="x", padx=20, pady=(0, 14))
+        path_row.grid_columnconfigure(0, weight=1)
+        path_var = StringVar()
+        path_entry = ctk.CTkEntry(path_row, textvariable=path_var,
+                                  placeholder_text="Path to adb.exe  (e.g. C:\\platform-tools\\adb.exe)")
+        path_entry.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+
+        def browse():
+            p = filedialog.askopenfilename(
+                title="Locate adb.exe",
+                filetypes=[("ADB executable", "adb.exe"), ("All files", "*.*")])
+            if p:
+                path_var.set(p)
+
+        ctk.CTkButton(path_row, text="Browse…", width=90, command=browse).grid(row=0, column=1)
+
+        def confirm():
+            global ADB
+            p = path_var.get().strip()
+            if p and Path(p).exists():
+                ADB = p
+                try:
+                    (DATA_DIR / "adb_path.txt").write_text(p)
+                except Exception:
+                    pass
+                dialog.destroy()
+                self._start_adb_server()
+            else:
+                path_entry.configure(border_color="red")
+
+        btn_row = ctk.CTkFrame(dialog, fg_color="transparent")
+        btn_row.pack(fill="x", padx=20)
+        ctk.CTkButton(btn_row, text="Cancel", width=90, fg_color="gray40",
+                      command=dialog.destroy).pack(side="right", padx=(8, 0))
+        ctk.CTkButton(btn_row, text="OK", width=90, command=confirm).pack(side="right")
+
+    def _scan(self):
+        subnet = self._subnet_var.get().strip().rstrip(".")
+        if not subnet:
+            self._log("Enter a subnet prefix (e.g. 192.168.1) before scanning.")
+            return
+        self.scan_btn.configure(state="disabled")
+        self.scan_status.configure(text="Scanning + verifying…")
+        self._log(f"Scanning {subnet}.0/24 — verifying Android devices...")
+
+        def done():
+            self.after(0, lambda: self.scan_btn.configure(state="normal"))
+            self.after(0, lambda: self.scan_status.configure(text="Scan complete"))
+            self._log("Scan complete.")
+
+        scan_subnet(base=subnet, result_callback=self._add_discovered, done_callback=done)
+
+    def _scan_mdns(self):
+        self.scan_status.configure(text="mDNS scan…")
+        self._log("Running mDNS scan for wireless debugging devices...")
+        def run():
+            results = scan_mdns()
+            if results:
+                self._log(f"mDNS: found {len(results)} wireless debug device(s).")
+                self._add_discovered(results)
+            else:
+                self._log("mDNS: no wireless debugging devices found.")
+            self.after(0, lambda: self.scan_status.configure(text=""))
+        threading.Thread(target=run, daemon=True).start()
+
+    def _connect(self):
+        ip = self.selected_ip.get()
+        if not ip:
+            self._log("No device selected.")
+            return
+        meta = self.history.get(ip, {})
+        port = meta.get("port", 5555) if isinstance(meta, dict) else 5555
+        self._connect_to(ip, port)
+
+    def _connect_manual(self):
+        ip = self._manual_ip_var.get().strip()
+        if not ip:
+            self._log("Enter an IP address.")
+            return
+        try:
+            port = int(self._manual_port_var.get().strip() or "5555")
+        except ValueError:
+            self._log("Port must be a number.")
+            return
+        self._connect_to(ip, port)
+
+    def _connect_to(self, ip, port=5555):
+        serial = f"{ip}:{port}"
+        def run():
+            self._log(f"Connecting to {serial}...")
+            result = adb("connect", serial)
+            self._log(result)
+            if "connected" in result.lower() or "already" in result.lower():
+                self.serial = serial
+                self._refresh_info_async()
+            else:
+                self._log(f"Failed to connect to {serial}")
+                self.after(0, lambda: self.status_label.configure(
+                    text=f"Failed: {serial}", text_color="red"))
+        threading.Thread(target=run, daemon=True).start()
+
+    def _disconnect(self):
+        def run():
+            self._log("Disconnecting...")
+            if self.serial:
+                adb("disconnect", self.serial)
+            self.serial = None
+            self.after(0, lambda: self.status_label.configure(
+                text="Not connected", text_color="gray"))
+            self._log("Disconnected.")
+        threading.Thread(target=run, daemon=True).start()
+
+    def _open_pair_dialog(self):
+        """Wireless debugging pairing dialog for Android 11+ (adb pair)."""
+        dlg = ctk.CTkToplevel(self)
+        dlg.title("Wireless Debugging Pair (Android 11+)")
+        dlg.geometry("420x310")
+        dlg.resizable(False, False)
+        dlg.grab_set()
+        dlg.lift()
+
+        ctk.CTkLabel(dlg, text="Pair via Wireless Debugging",
+                     font=ctk.CTkFont(size=13, weight="bold")).pack(padx=20, pady=(16, 4), anchor="w")
+        ctk.CTkLabel(dlg, text=(
+            "On the TV: Settings → Developer Options → Wireless Debugging\n"
+            "Tap 'Pair device with pairing code' to get the pairing port + code."),
+            text_color="gray", font=ctk.CTkFont(size=11), justify="left").pack(padx=20, pady=(0, 10), anchor="w")
+
+        form = ctk.CTkFrame(dlg, fg_color="transparent")
+        form.pack(fill="x", padx=20)
+        form.grid_columnconfigure(1, weight=1)
+
+        fields = [("IP Address", "pair_ip"), ("Pairing Port", "pair_port"),
+                  ("6-digit Code", "pair_code"), ("Connect Port", "pair_conn_port")]
+        self._pair_vars = {}
+        hints = ["192.168.1.x", "e.g. 42389", "e.g. 123456", "shown on Wireless Debug screen"]
+        for i, ((lbl, key), hint) in enumerate(zip(fields, hints)):
+            ctk.CTkLabel(form, text=lbl + ":", width=110, anchor="e",
+                         font=ctk.CTkFont(size=11)).grid(row=i, column=0, padx=(0, 8), pady=4, sticky="e")
+            var = StringVar()
+            self._pair_vars[key] = var
+            ctk.CTkEntry(form, textvariable=var, placeholder_text=hint,
+                         height=28, font=ctk.CTkFont(size=11)).grid(row=i, column=1, sticky="ew", pady=4)
+
+        status = ctk.CTkLabel(dlg, text="", font=ctk.CTkFont(size=11), text_color="gray")
+        status.pack(padx=20, pady=(8, 0), anchor="w")
+
+        def do_pair():
+            ip   = self._pair_vars["pair_ip"].get().strip()
+            port = self._pair_vars["pair_port"].get().strip()
+            code = self._pair_vars["pair_code"].get().strip()
+            conn = self._pair_vars["pair_conn_port"].get().strip()
+            if not ip or not port or not code:
+                status.configure(text="IP, pairing port, and code are required.", text_color="red")
+                return
+            pair_btn.configure(state="disabled", text="Pairing…")
+            def run():
+                self._log(f"Pairing with {ip}:{port} code={code}...")
+                result = adb("pair", f"{ip}:{port}", code)
+                self._log(result)
+                if "successfully" in result.lower() or "paired" in result.lower():
+                    conn_port = conn or port
+                    self._log(f"Pair OK. Connecting to {ip}:{conn_port}...")
+                    r2 = adb("connect", f"{ip}:{conn_port}")
+                    self._log(r2)
+                    if "connected" in r2.lower() or "already" in r2.lower():
+                        self.serial = f"{ip}:{conn_port}"
+                        save_history(ip, "(wireless debug)", port=int(conn_port))
+                        self.history[ip] = {"label": "(wireless debug)",
+                                            "port": int(conn_port),
+                                            "last_seen": "", "verified": True, "wireless": True}
+                        self.after(0, self._populate_device_list)
+                        self.after(0, lambda: status.configure(text="Connected!", text_color="green"))
+                        self._refresh_info_async()
+                        return
+                self.after(0, lambda: status.configure(text="Pairing failed — check code/port.", text_color="red"))
+                self.after(0, lambda: pair_btn.configure(state="normal", text="Pair & Connect"))
+            threading.Thread(target=run, daemon=True).start()
+
+        btn_row = ctk.CTkFrame(dlg, fg_color="transparent")
+        btn_row.pack(fill="x", padx=20, pady=(8, 16))
+        ctk.CTkButton(btn_row, text="Cancel", width=90, fg_color="gray40",
+                      command=dlg.destroy).pack(side="right", padx=(8, 0))
+        pair_btn = ctk.CTkButton(btn_row, text="Pair & Connect", width=120, command=do_pair)
+        pair_btn.pack(side="right")
+
+    def _refresh_info(self):
+        if not self.serial:
+            self._log("Not connected.")
+            return
+        threading.Thread(target=self._refresh_info_async, daemon=True).start()
+
+    def _refresh_info_async(self):
+        s = self.serial
+        manufacturer = adb_out("shell", "getprop", "ro.product.manufacturer", serial=s)
+        model        = adb_out("shell", "getprop", "ro.product.model", serial=s)
+        android_ver  = adb_out("shell", "getprop", "ro.build.version.release", serial=s)
+        build_id     = adb_out("shell", "getprop", "ro.build.display.id", serial=s)
+        serial_no    = adb_out("shell", "getprop", "ro.serialno", serial=s)
+        abi          = adb_out("shell", "getprop", "ro.product.cpu.abi", serial=s)
+        dns          = adb_out("shell", "settings", "get", "global", "private_dns_mode", serial=s)
+        pkgv         = adb_out("shell", "settings", "get", "global", "package_verifier_user_consent", serial=s)
+
+        wm_raw = adb_out("shell", "wm", "size", serial=s)
+        resolution = "—"
+        for line in wm_raw.splitlines():
+            if "Physical size" in line or "Override size" in line:
+                resolution = line.split(":")[-1].strip()
+                break
+            if "x" in line.lower():
+                resolution = line.strip()
+                break
+
+        batt_raw = adb_out("shell", "dumpsys", "battery", serial=s, timeout=10)
+        battery = "—"
+        for line in batt_raw.splitlines():
+            if "level:" in line:
+                battery = line.split(":")[-1].strip() + "%"
+                break
+
+        ime_raw = adb_out("shell", "dumpsys", "input_method", serial=s, timeout=15)
+        ime = "—"
+        for line in ime_raw.splitlines():
+            if "mCurMethodId" in line:
+                ime = line.split("=")[-1].strip()
+                break
+
+        label = f"{manufacturer} {model}".strip()
+        ip    = s.split(":")[0]
+        port  = int(s.split(":")[-1]) if ":" in s else 5555
+        if label:
+            save_history(ip, label, port=port, touch_seen=True)
+            existing = self.history.get(ip, {})
+            if isinstance(existing, dict):
+                existing.update({"label": label, "port": port, "verified": True})
+            else:
+                existing = {"label": label, "port": port, "last_seen": "", "verified": True}
+            self.history[ip] = existing
+
+        def update():
+            self.info_manufacturer.configure(text=manufacturer or "—")
+            self.info_model.configure(text=model or "—")
+            self.info_android.configure(text=android_ver or "—")
+            self.info_build.configure(text=build_id or "—")
+            self.info_serial.configure(text=serial_no or "—")
+            self.info_resolution.configure(text=resolution)
+            self.info_battery.configure(text=battery)
+            self.info_abi.configure(text=abi or "—")
+            self.info_dns.configure(text=dns or "—")
+            self.info_pkgverifier.configure(text=pkgv or "—")
+            self.info_ime.configure(text=ime)
+            self.status_label.configure(
+                text=f"Connected: {label or s}  ({s})", text_color="#4CAF50")
+            self._populate_device_list()
+
+        self.after(0, update)
+        self._log(f"Device: {label}  |  Android: {android_ver}  |  ABI: {abi}  |  Battery: {battery}")
+
+    def _require_connection(self):
+        if not self.serial:
+            self._log("Not connected to any device.")
+            return False
+        return True
+
+    def _list_packages(self, flag):
+        if not self._require_connection():
+            return
+        def run():
+            args = ["shell", "pm", "list", "packages"]
+            if flag:
+                args.append(flag)
+            self._log(f"Listing packages {flag or '(all)'}...")
+            result = adb_out(*args, serial=self.serial, timeout=30)
+            self.after(0, lambda: self._show_packages(result))
+        threading.Thread(target=run, daemon=True).start()
+
+    def _show_packages(self, text):
+        self.pkg_listbox.delete(0, "end")
+        for line in text.splitlines():
+            pkg = line.strip()
+            if pkg.startswith("package:"):
+                pkg = pkg[len("package:"):]
+            if pkg:
+                self.pkg_listbox.insert("end", pkg)
+
+    def _selected_package(self):
+        sel = self.pkg_listbox.curselection()
+        if not sel:
+            self._log("No package selected.")
+            return None
+        return self.pkg_listbox.get(sel[0])
+
+    def _pkg_uninstall(self):
+        if not self._require_connection():
+            return
+        pkg = self._selected_package()
+        if not pkg:
+            return
+        def run():
+            self._log(f"Uninstalling {pkg}...")
+            result = adb("shell", "pm", "uninstall", "--user", "0", pkg, serial=self.serial)
+            self._log(result or "Done.")
+        threading.Thread(target=run, daemon=True).start()
+
+    def _pkg_disable(self):
+        if not self._require_connection():
+            return
+        pkg = self._selected_package()
+        if not pkg:
+            return
+        def run():
+            self._log(f"Disabling {pkg}...")
+            result = adb("shell", "pm", "disable-user", "--user", "0", pkg, serial=self.serial)
+            self._log(result or "Done.")
+        threading.Thread(target=run, daemon=True).start()
+
+    def _pkg_enable(self):
+        if not self._require_connection():
+            return
+        pkg = self._selected_package()
+        if not pkg:
+            return
+        def run():
+            self._log(f"Enabling {pkg}...")
+            result = adb("shell", "pm", "enable", pkg, serial=self.serial)
+            self._log(result or "Done.")
+        threading.Thread(target=run, daemon=True).start()
+
+    def _list_playstore_pkgs(self):
+        if not self._require_connection():
+            return
+        def run():
+            self._log("Listing Play Store packages...")
+            raw = adb_out("shell", "pm", "list", "packages", "-i", serial=self.serial, timeout=30)
+            lines = [l for l in raw.splitlines() if "installer=com.android.vending" in l]
+            pkgs = [l.split("package:")[-1].split(" ")[0] for l in lines]
+            self.after(0, lambda: self._show_packages("\n".join(f"package:{p}" for p in pkgs)))
+            self._log(f"Found {len(pkgs)} Play Store packages.")
+        threading.Thread(target=run, daemon=True).start()
+
+    def _list_sideloaded_pkgs(self):
+        if not self._require_connection():
+            return
+        def run():
+            self._log("Listing sideloaded packages...")
+            raw = adb_out("shell", "pm", "list", "packages", "-i", "-3", serial=self.serial, timeout=30)
+            lines = [l for l in raw.splitlines()
+                     if "installer=com.android.vending" not in l and l.startswith("package:")]
+            pkgs = [l.split("package:")[-1].split(" ")[0] for l in lines]
+            self.after(0, lambda: self._show_packages("\n".join(f"package:{p}" for p in pkgs)))
+            self._log(f"Found {len(pkgs)} sideloaded packages.")
+        threading.Thread(target=run, daemon=True).start()
+
+    def _pkg_version(self):
+        if not self._require_connection():
+            return
+        pkg = self._selected_package()
+        if not pkg:
+            return
+        def run():
+            raw = adb_out("shell", "dumpsys", "package", pkg, serial=self.serial, timeout=15)
+            version = "unknown"
+            for line in raw.splitlines():
+                if "versionName=" in line:
+                    version = line.strip().split("versionName=")[-1].split(" ")[0]
+                    break
+            self._log(f"{pkg}  version: {version}")
+        threading.Thread(target=run, daemon=True).start()
+
+    def _pkg_clear_cache(self):
+        if not self._require_connection():
+            return
+        pkg = self._selected_package()
+        if not pkg:
+            return
+        def run():
+            self._log(f"Clearing cache for {pkg}...")
+            result = adb("shell", "pm", "clear-cache", pkg, serial=self.serial)
+            self._log(result or "Cache cleared.")
+        threading.Thread(target=run, daemon=True).start()
+
+    def _pkg_clear_data(self):
+        if not self._require_connection():
+            return
+        pkg = self._selected_package()
+        if not pkg:
+            return
+        def run():
+            self._log(f"Clearing data for {pkg}...")
+            result = adb("shell", "pm", "clear", pkg, serial=self.serial)
+            self._log(result or "Data cleared.")
+        threading.Thread(target=run, daemon=True).start()
+
+    def _compile_speed_profile(self):
+        if not self._require_connection():
+            return
+        def run():
+            self._log("Compiling speed profile (this takes a few minutes)...")
+            result = adb("shell", "cmd", "package", "compile", "-m", "speed-profile", "-a",
+                        serial=self.serial, timeout=300)
+            self._log(result or "Done.")
+        threading.Thread(target=run, daemon=True).start()
+
+    def _enable_freezer(self):
+        if not self._require_connection():
+            return
+        def run():
+            self._log("Enabling app freezer...")
+            result = adb("shell", "settings", "put", "global", "cached_apps_freezer", "enabled",
+                        serial=self.serial)
+            self._log(result or "App freezer enabled.")
+        threading.Thread(target=run, daemon=True).start()
+
+    def _optimize_touch(self):
+        if not self._require_connection():
+            return
+        def run():
+            self._log("Optimizing touch response...")
+            adb("shell", "settings", "put", "secure", "tap_duration_threshold", "0.0", serial=self.serial)
+            adb("shell", "settings", "put", "secure", "touch_blocking_period", "0.0", serial=self.serial)
+            self._log("Touch optimized.")
+        threading.Thread(target=run, daemon=True).start()
+
+    def _all_optimizations(self):
+        if not self._require_connection():
+            return
+        def run():
+            self._log("Running all optimizations...")
+            self._log("  [1/3] Enabling app freezer...")
+            adb("shell", "settings", "put", "global", "cached_apps_freezer", "enabled", serial=self.serial)
+            self._log("  [2/3] Optimizing touch...")
+            adb("shell", "settings", "put", "secure", "tap_duration_threshold", "0.0", serial=self.serial)
+            adb("shell", "settings", "put", "secure", "touch_blocking_period", "0.0", serial=self.serial)
+            self._log("  [3/3] Compiling speed profile (may take minutes)...")
+            result = adb("shell", "cmd", "package", "compile", "-m", "speed-profile", "-a",
+                        serial=self.serial, timeout=300)
+            self._log(result or "All optimizations complete.")
+        threading.Thread(target=run, daemon=True).start()
+
+    def _set_animations(self, scale):
+        if not self._require_connection():
+            return
+        def run():
+            self._log(f"Setting animation scale to {scale}×...")
+            for key in ("window_animation_scale", "transition_animation_scale", "animator_duration_scale"):
+                adb("shell", "settings", "put", "global", key, scale, serial=self.serial)
+            self._log("Animation scale updated.")
+        threading.Thread(target=run, daemon=True).start()
+
+    def _clear_all_caches(self):
+        if not self._require_connection():
+            return
+        def run():
+            self._log("Trimming all app caches...")
+            result = adb("shell", "pm", "trim-caches", "0", serial=self.serial, timeout=30)
+            self._log(result or "Caches trimmed.")
+        threading.Thread(target=run, daemon=True).start()
+
+    def _kill_background_apps(self):
+        if not self._require_connection():
+            return
+        def run():
+            self._log("Killing background apps...")
+            result = adb("shell", "am", "kill-all", serial=self.serial)
+            self._log(result or "Background apps killed.")
+        threading.Thread(target=run, daemon=True).start()
+
+    def _browse_apk(self):
+        path = filedialog.askopenfilename(filetypes=[("APK files", "*.apk"), ("All files", "*.*")])
+        if path:
+            self.apk_path_var.set(path)
+            self._selected_apk = path
+
+    def _install_apk(self):
+        if not self._require_connection():
+            return
+        apk = getattr(self, "_selected_apk", None)
+        if not apk or not os.path.exists(apk):
+            self._log("No APK selected or file not found.")
+            return
+        def run():
+            self._log(f"Installing {os.path.basename(apk)}...")
+            adb("shell", "settings", "put", "global", "package_verifier_user_consent", "-1", serial=self.serial)
+            adb("shell", "settings", "put", "global", "package_verifier_enable", "0", serial=self.serial)
+            result = adb("install", "-r", "-g", apk, serial=self.serial, timeout=120)
+            adb("shell", "settings", "put", "global", "package_verifier_user_consent", "1", serial=self.serial)
+            adb("shell", "settings", "put", "global", "package_verifier_enable", "1", serial=self.serial)
+            self._log(result or "Install complete.")
+        threading.Thread(target=run, daemon=True).start()
+
+    def _refresh_shizuku_status(self):
+        apk_present = SHIZUKU_APK.exists()
+        if apk_present:
+            self._shizuku_status_label.configure(text="shizuku.apk ready.", text_color="gray")
+            self._shizuku_dl_btn.configure(state="disabled")
+            self._shizuku_install_btn.configure(state="normal")
+        else:
+            self._shizuku_status_label.configure(text="shizuku.apk not downloaded yet.", text_color="gray")
+            self._shizuku_dl_btn.configure(state="normal")
+            self._shizuku_install_btn.configure(state="disabled")
+
+    def _download_shizuku(self):
+        self._shizuku_dl_btn.configure(state="disabled", text="Downloading...")
+        def run():
+            try:
+                self._log("Fetching latest Shizuku release from GitHub...")
+                req = urllib.request.Request(
+                    "https://api.github.com/repos/RikkaApps/Shizuku/releases/latest",
+                    headers={"User-Agent": "AndroidTVTools/4.0", "Accept": "application/vnd.github+json"})
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    data = _json.loads(resp.read())
+                apk_url = next(
+                    (a["browser_download_url"] for a in data.get("assets", [])
+                     if a["name"].endswith(".apk")), None)
+                if not apk_url:
+                    self._log("Could not find APK in latest release.")
+                    self.after(0, lambda: self._shizuku_dl_btn.configure(state="normal", text="Download Shizuku"))
+                    return
+                version = data.get("tag_name", "")
+                self._log(f"Downloading Shizuku {version}...")
+                dest = str(SHIZUKU_APK)
+                urllib.request.urlretrieve(apk_url, dest)
+                self._log(f"Shizuku {version} saved to tool folder.")
+                self.after(0, self._refresh_shizuku_status)
+            except Exception as e:
+                self._log(f"Download failed: {e}")
+                self.after(0, lambda: self._shizuku_dl_btn.configure(state="normal", text="Download Shizuku"))
+        threading.Thread(target=run, daemon=True).start()
+
+    def _install_shizuku(self):
+        if not self._require_connection():
+            return
+        shizuku_apk = str(SHIZUKU_APK)
+        if not os.path.exists(shizuku_apk):
+            self._log("shizuku.apk not found — use Download Shizuku first.")
+            return
+        def run():
+            self._log("Checking Shizuku...")
+            check = adb("shell", "pm", "list", "packages", "moe.shizuku.privileged.api", serial=self.serial)
+            if "moe.shizuku" in check:
+                self._log("Shizuku already installed.")
+            else:
+                self._log("Installing Shizuku...")
+                adb("shell", "settings", "put", "global", "package_verifier_user_consent", "-1", serial=self.serial)
+                result = adb("install", "-r", "-g", shizuku_apk, serial=self.serial, timeout=60)
+                adb("shell", "settings", "put", "global", "package_verifier_user_consent", "1", serial=self.serial)
+                self._log(result or "Shizuku installed.")
+        threading.Thread(target=run, daemon=True).start()
+
+    def _launch_shizuku(self):
+        if not self._require_connection():
+            return
+        def run():
+            self._log("Launching Shizuku...")
+            adb("shell", "monkey", "-p", "moe.shizuku.privileged.api", "1", serial=self.serial)
+            result = adb("shell", "sh", "/sdcard/Android/data/moe.shizuku.privileged.api/start.sh", serial=self.serial)
+            self._log(result or "Shizuku launched.")
+        threading.Thread(target=run, daemon=True).start()
+
+    def _browse_bulk_folder(self):
+        folder = filedialog.askdirectory(title="Select folder with APK files")
+        if not folder:
+            return
+        apks = list(Path(folder).glob("*.apk"))
+        if not apks:
+            self._log("No APK files found in selected folder.")
+            return
+        if not self._require_connection():
+            return
+        def run():
+            self._log(f"Bulk installing {len(apks)} APK(s)...")
+            adb("shell", "settings", "put", "global", "package_verifier_user_consent", "-1", serial=self.serial)
+            adb("shell", "settings", "put", "global", "package_verifier_enable", "0", serial=self.serial)
+            for i, apk in enumerate(apks, 1):
+                self._log(f"  [{i}/{len(apks)}] {apk.name}")
+                result = adb("install", "-r", "-g", str(apk), serial=self.serial, timeout=120)
+                self._log(f"    → {result or 'OK'}")
+            adb("shell", "settings", "put", "global", "package_verifier_user_consent", "1", serial=self.serial)
+            adb("shell", "settings", "put", "global", "package_verifier_enable", "1", serial=self.serial)
+            self._log("Bulk install complete.")
+        threading.Thread(target=run, daemon=True).start()
+
+    def _qi_download(self, name):
+        meta = self._qi_apps[name]
+        meta["dl_btn"].configure(state="disabled", text="Downloading...")
+        def run():
+            try:
+                self._log(f"Fetching latest {name} release...")
+                if meta.get("gitlab"):
+                    # Aurora Store on GitLab
+                    api = "https://gitlab.com/api/v4/projects/AuroraOSS%2FAuroraStore/releases"
+                    req = urllib.request.Request(api, headers={"User-Agent": "AndroidTVTools/4.1"})
+                    with urllib.request.urlopen(req, timeout=15) as resp:
+                        data = _json.loads(resp.read())
+                    # find first .apk asset link
+                    apk_url = None
+                    for release in data[:1]:
+                        for link in release.get("assets", {}).get("links", []):
+                            if link["url"].endswith(".apk"):
+                                apk_url = link["url"]
+                                break
+                else:
+                    repo = meta["repo"]
+                    api = f"https://api.github.com/repos/{repo}/releases/latest"
+                    req = urllib.request.Request(api, headers={
+                        "User-Agent": "AndroidTVTools/4.1",
+                        "Accept": "application/vnd.github+json"})
+                    with urllib.request.urlopen(req, timeout=15) as resp:
+                        data = _json.loads(resp.read())
+                    assets = data.get("assets", [])
+                    contains = meta.get("asset_contains", "")
+                    suffix = meta.get("asset_suffix", ".apk")
+                    if contains:
+                        apk_url = next((a["browser_download_url"] for a in assets
+                                        if contains in a["name"].lower() and a["name"].endswith(".apk")), None)
+                    else:
+                        apk_url = next((a["browser_download_url"] for a in assets
+                                        if a["name"].endswith(suffix)), None)
+
+                if not apk_url:
+                    self._log(f"Could not find APK for {name}.")
+                    self.after(0, lambda: meta["dl_btn"].configure(state="normal", text="Download"))
+                    return
+                self._log(f"Downloading {name}...")
+                urllib.request.urlretrieve(apk_url, str(meta["file"]))
+                self._log(f"{name} downloaded.")
+                def refresh():
+                    meta["dl_btn"].configure(state="disabled", text="Download")
+                    meta["inst_btn"].configure(state="normal")
+                self.after(0, refresh)
+            except Exception as e:
+                self._log(f"Download failed for {name}: {e}")
+                self.after(0, lambda: meta["dl_btn"].configure(state="normal", text="Download"))
+        threading.Thread(target=run, daemon=True).start()
+
+    def _qi_install(self, name):
+        if not self._require_connection():
+            return
+        meta = self._qi_apps[name]
+        apk = str(meta["file"])
+        if not os.path.exists(apk):
+            self._log(f"{name} APK not found — download it first.")
+            return
+        def run():
+            self._log(f"Installing {name}...")
+            adb("shell", "settings", "put", "global", "package_verifier_user_consent", "-1", serial=self.serial)
+            adb("shell", "settings", "put", "global", "package_verifier_enable", "0", serial=self.serial)
+            result = adb("install", "-r", "-g", apk, serial=self.serial, timeout=120)
+            adb("shell", "settings", "put", "global", "package_verifier_user_consent", "1", serial=self.serial)
+            adb("shell", "settings", "put", "global", "package_verifier_enable", "1", serial=self.serial)
+            self._log(result or f"{name} installed.")
+        threading.Thread(target=run, daemon=True).start()
+
+    def _google_search_weather(self):
+        if not self._require_connection():
+            return
+        def run():
+            result = adb("shell", "am", "start", "-a", "android.search.action.GLOBAL_SEARCH",
+                        "--es", "query", "Tell me what the weather is like today", serial=self.serial)
+            self._log(result or "Opened Google Search.")
+        threading.Thread(target=run, daemon=True).start()
+
+    def _system_updates(self):
+        if not self._require_connection():
+            return
+        def run():
+            result = adb("shell", "am", "start", "-a", "android.settings.SYSTEM_UPDATE_SETTINGS", serial=self.serial)
+            self._log(result or "Opened System Update Settings.")
+        threading.Thread(target=run, daemon=True).start()
+
+    @staticmethod
+    def _escape_adb_text(text):
+        _SHELL_SPECIAL = set(r'\"`$&|;()<>!#*?[]{}^~\'')
+        result = []
+        for ch in text:
+            if ch == ' ':
+                result.append('%s')
+            elif ch in _SHELL_SPECIAL:
+                result.append('\\' + ch)
+            else:
+                result.append(ch)
+        return ''.join(result)
+
+    def _send_text(self):
+        if not self._require_connection():
+            return
+        text = self._send_text_entry.get()
+        if not text:
+            return
+        def run():
+            adb("shell", "input", "text", self._escape_adb_text(text), serial=self.serial)
+            self._log(f"Sent text: {text}")
+        self._send_text_entry.delete(0, "end")
+        threading.Thread(target=run, daemon=True).start()
+
+    def _adb_disconnect_all(self):
+        def run():
+            result = adb("disconnect")
+            self.serial = None
+            self.after(0, lambda: self.status_label.configure(text="Not connected", text_color="gray"))
+            self._log(result or "Disconnected all.")
+        threading.Thread(target=run, daemon=True).start()
+
+    def _keyevent(self, code):
+        if not self._require_connection():
+            return
+        threading.Thread(target=lambda: adb("shell", "input", "keyevent", str(code), serial=self.serial), daemon=True).start()
+
+    def _reboot_soft(self):
+        if not self._require_connection():
+            return
+        def run():
+            self._log("Rebooting device...")
+            adb("shell", "reboot", serial=self.serial)
+        threading.Thread(target=run, daemon=True).start()
+
+    def _reboot_recovery(self):
+        if not self._require_connection():
+            return
+        def run():
+            self._log("Rebooting to recovery...")
+            adb("shell", "reboot", "recovery", serial=self.serial)
+        threading.Thread(target=run, daemon=True).start()
+
+    def _notification_curtain(self):
+        if not self._require_connection():
+            return
+        def run():
+            adb("shell", "cmd", "statusbar", "expand-notifications", serial=self.serial)
+            self._log("Notification curtain expanded.")
+        threading.Thread(target=run, daemon=True).start()
+
+    def _launch_app(self):
+        if not self._require_connection():
+            return
+        pkg = self._launch_pkg_entry.get().strip()
+        if not pkg:
+            self._log("Enter a package name.")
+            return
+        def run():
+            result = adb("shell", "monkey", "-p", pkg, "1", serial=self.serial)
+            self._log(result or f"Launched {pkg}.")
+        threading.Thread(target=run, daemon=True).start()
+
+    def _open_settings(self, action):
+        if not self._require_connection():
+            return
+        def run():
+            result = adb("shell", "am", "start", "-a", action, serial=self.serial)
+            self._log(result or f"Opened {action}.")
+        threading.Thread(target=run, daemon=True).start()
+
+    def _run_adb_console(self):
+        if not self._require_connection():
+            return
+        raw = self._adb_cmd_entry.get().strip()
+        if not raw:
+            return
+        # strip leading "adb shell" or "adb" if user typed it
+        cmd = raw
+        for prefix in ("adb shell ", "adb "):
+            if cmd.lower().startswith(prefix):
+                cmd = cmd[len(prefix):]
+                break
+        self._adb_cmd_entry.delete(0, "end")
+        def run():
+            self._log(f"$ {raw}")
+            import shlex
+            parts = shlex.split(cmd)
+            result = adb("shell", *parts, serial=self.serial, timeout=30)
+            self._log(result or "(no output)")
+        threading.Thread(target=run, daemon=True).start()
+
+    # ── screenshot ─────────────────────────────────────────────────────────────
+    def _take_screenshot(self):
+        if not self._require_connection():
+            return
+        def run():
+            self._log("Taking screenshot...")
+            self._screenshot_label_set("Capturing...")
+            adb("shell", "screencap", "-p", "/sdcard/_tv_tools_cap.png", serial=self.serial)
+            tmp = str(SCREENSHOT_TMP)
+            adb("pull", "/sdcard/_tv_tools_cap.png", tmp, serial=self.serial)
+            adb("shell", "rm", "/sdcard/_tv_tools_cap.png", serial=self.serial)
+            if not os.path.exists(tmp):
+                self._log("Screenshot failed — file not pulled.")
+                self._screenshot_label_set("Failed.")
+                return
+            self._log("Screenshot captured.")
+            self.after(0, lambda: self._display_screenshot(tmp))
+        threading.Thread(target=run, daemon=True).start()
+
+    def _display_screenshot(self, path):
+        try:
+            from PIL import Image, ImageTk
+            img = Image.open(path)
+            # scale to fit the canvas widget (max 800×500)
+            img.thumbnail((800, 500), Image.LANCZOS)
+            photo = ImageTk.PhotoImage(img)
+            self._screenshot_image = photo  # keep reference
+            self._screenshot_canvas.configure(image=photo, text="")
+            self._screenshot_label_set(f"Captured  {img.width}×{img.height}px  —  {os.path.basename(path)}")
+        except ImportError:
+            self._log("Pillow not installed — run: uv pip install pillow")
+            self._screenshot_label_set("Install Pillow to preview.")
+        except Exception as e:
+            self._log(f"Preview error: {e}")
+
+    def _save_screenshot(self):
+        tmp = str(SCREENSHOT_TMP)
+        if not os.path.exists(tmp):
+            self._log("No screenshot to save — take one first.")
+            return
+        dest = filedialog.asksaveasfilename(
+            defaultextension=".png",
+            filetypes=[("PNG image", "*.png"), ("All files", "*.*")],
+            initialfile="screenshot.png")
+        if dest:
+            import shutil
+            shutil.copy2(tmp, dest)
+            self._log(f"Saved to {dest}")
+
+    def _screenshot_label_set(self, text):
+        self.after(0, lambda: self._screenshot_label.configure(text=text))
+
+    # ── log ────────────────────────────────────────────────────────────────────
+    def _copy_log(self):
+        self.log_box.configure(state="normal")
+        text = self.log_box.get("1.0", "end").strip()
+        self.log_box.configure(state="disabled")
+        if text:
+            self.clipboard_clear()
+            self.clipboard_append(text)
+            self.copy_btn.configure(text="Copied!")
+            self.after(1500, lambda: self.copy_btn.configure(text="Copy"))
+
+    def _log(self, msg):
+        def append():
+            self.log_box.configure(state="normal")
+            self.log_box.insert("end", msg.rstrip() + "\n")
+            self.log_box.see("end")
+            self.log_box.configure(state="disabled")
+        self.after(0, append)
+
+
+def main():
+    app = App()
+    app.mainloop()
+
+if __name__ == "__main__":
+    main()

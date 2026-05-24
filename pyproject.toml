@@ -1,0 +1,16 @@
+[project]
+name = "android-tv-tools"
+version = "4.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "customtkinter",
+    "pillow",
+]
+
+[dependency-groups]
+dev = [
+    "pyinstaller",
+]
+
+[project.scripts]
+android-tv-tools = "android_tv_tools:main"
