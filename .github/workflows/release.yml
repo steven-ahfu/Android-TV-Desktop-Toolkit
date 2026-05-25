@@ -2,15 +2,46 @@ name: Release
 
 on:
   push:
-    tags:
-      - "v*"
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
 
 jobs:
-  build:
-    runs-on: windows-latest
-    permissions:
-      contents: write
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.compute.outputs.tag }}
+      should_release: ${{ steps.compute.outputs.should_release }}
+    steps:
+      - uses: actions/checkout@v4
 
+      - name: Compute tag and check if release is needed
+        id: compute
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            tag="${GITHUB_REF#refs/tags/}"
+            should_release=true
+          else
+            version=$(sed -nE 's/^version = "(.*)"/\1/p' pyproject.toml | head -n1)
+            if [[ -z "$version" ]]; then
+              echo "Could not read version from pyproject.toml" >&2
+              exit 1
+            fi
+            tag="v$version"
+            if git ls-remote --exit-code --tags origin "$tag" >/dev/null 2>&1; then
+              should_release=false
+            else
+              should_release=true
+            fi
+          fi
+          echo "tag=$tag"               >> "$GITHUB_OUTPUT"
+          echo "should_release=$should_release" >> "$GITHUB_OUTPUT"
+          echo "Resolved tag: $tag (should_release=$should_release)"
+
+  build-windows:
+    needs: prepare
+    if: needs.prepare.outputs.should_release == 'true'
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -41,8 +72,80 @@ jobs:
             --collect-all customtkinter `
             android_tv_tools.py
 
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-exe
+          path: dist/Android TV Tools.exe
+          if-no-files-found: error
+
+  build-macos:
+    needs: prepare
+    if: needs.prepare.outputs.should_release == 'true'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --all-groups
+
+      - name: Download macOS ADB
+        run: |
+          curl -L https://dl.google.com/android/repository/platform-tools-latest-darwin.zip -o platform-tools.zip
+          unzip -q platform-tools.zip platform-tools/adb
+          mkdir -p bin
+          cp platform-tools/adb bin/adb
+          chmod +x bin/adb
+
+      - name: Build .app
+        run: |
+          uv run pyinstaller \
+            --noconfirm \
+            --windowed \
+            --name "Android TV Tools" \
+            --icon "assets/ATV Tools.png" \
+            --add-data "assets:assets" \
+            --add-data "bin:bin" \
+            --collect-all customtkinter \
+            android_tv_tools.py
+
+      - name: Create .dmg
+        run: |
+          hdiutil create \
+            -volname "Android TV Tools" \
+            -srcfolder "dist/Android TV Tools.app" \
+            -ov -format UDZO \
+            "dist/AndroidTVTools.dmg"
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg
+          path: dist/AndroidTVTools.dmg
+          if-no-files-found: error
+
+  release:
+    needs: [prepare, build-windows, build-macos]
+    if: needs.prepare.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist\Android TV Tools.exe
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          name: ${{ needs.prepare.outputs.tag }}
+          files: |
+            artifacts/windows-exe/Android TV Tools.exe
+            artifacts/macos-dmg/AndroidTVTools.dmg
           generate_release_notes: true
+          fail_on_unmatched_files: true
