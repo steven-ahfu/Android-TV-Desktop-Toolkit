@@ -29,9 +29,9 @@ A Python/CustomTkinter desktop GUI for managing Android TV and Google TV devices
 
 ## Requirements
 
-**If you're using the pre-built release:** you only need ADB. The app will detect it automatically or walk you through finding it on first launch. Download [Android SDK Platform Tools](https://developer.android.com/tools/releases/platform-tools) from Google if you don't have it, and optionally add it to your `PATH`.
+**If you're using the pre-built release:** nothing — ADB is bundled inside the app. Just download and run.
 
-**If you're running from source or building the exe:** you also need Python 3.10+ and [uv](https://docs.astral.sh/uv/getting-started/installation/).
+**If you're running from source or building yourself:** you need Python 3.10+, [uv](https://docs.astral.sh/uv/getting-started/installation/), and [ADB](https://developer.android.com/tools/releases/platform-tools) somewhere on your system (or in `PATH`).
 
 **Enable ADB on your Android TV device:**
 Settings → Device Preferences → About → click **Build** 7× to unlock Developer Options, then enable **Network debugging** (ADB over Wi-Fi) in Developer Options.

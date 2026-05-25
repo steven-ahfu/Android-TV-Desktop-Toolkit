@@ -21,11 +21,12 @@ jobs:
       - name: Install dependencies
         run: uv sync --all-groups
 
-      - name: Get CustomTkinter path
-        id: ctk
+      - name: Download Windows ADB
         run: |
-          $path = uv run python -c "import customtkinter, os; print(os.path.dirname(customtkinter.__file__))"
-          echo "path=$path" >> $env:GITHUB_OUTPUT
+          Invoke-WebRequest https://dl.google.com/android/repository/platform-tools-latest-windows.zip -OutFile platform-tools.zip
+          Expand-Archive platform-tools.zip -DestinationPath platform-tools-extracted
+          New-Item -ItemType Directory -Force -Path bin | Out-Null
+          Copy-Item platform-tools-extracted\platform-tools\adb.exe bin\adb.exe
 
       - name: Build exe
         run: |
@@ -36,7 +37,8 @@ jobs:
             --name "Android TV Tools" `
             --icon "assets\icon.ico" `
             --add-data "assets;assets" `
-            --add-data "${{ steps.ctk.outputs.path }};customtkinter" `
+            --add-data "bin;bin" `
+            --collect-all customtkinter `
             android_tv_tools.py
 
       - name: Create GitHub Release
