@@ -1,0 +1,71 @@
+name: Build macOS
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    runs-on: macos-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --all-groups
+
+      - name: Download macOS ADB
+        run: |
+          curl -L https://dl.google.com/android/repository/platform-tools-latest-darwin.zip -o platform-tools.zip
+          unzip -q platform-tools.zip platform-tools/adb
+          mkdir -p bin
+          cp platform-tools/adb bin/adb
+          chmod +x bin/adb
+
+      - name: Get CustomTkinter path
+        id: ctk
+        run: |
+          path=$(uv run python -c "import customtkinter, os; print(os.path.dirname(customtkinter.__file__))")
+          echo "path=$path" >> "$GITHUB_OUTPUT"
+
+      - name: Build .app
+        run: |
+          uv run pyinstaller \
+            --noconfirm \
+            --windowed \
+            --name "Android TV Tools" \
+            --icon "assets/ATV Tools.png" \
+            --add-data "assets:assets" \
+            --add-data "bin:bin" \
+            --collect-all customtkinter \
+            android_tv_tools.py
+
+      - name: Create .dmg
+        run: |
+          hdiutil create \
+            -volname "Android TV Tools" \
+            -srcfolder "dist/Android TV Tools.app" \
+            -ov -format UDZO \
+            "dist/AndroidTVTools.dmg"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AndroidTVTools-macOS
+          path: dist/AndroidTVTools.dmg
+          retention-days: 30
+
+      - name: Attach to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/AndroidTVTools.dmg
+          generate_release_notes: false

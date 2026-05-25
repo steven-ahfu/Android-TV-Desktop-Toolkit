@@ -19,7 +19,8 @@ def _base_dir() -> Path:
         return Path(sys.executable).parent
     return Path(__file__).parent
 
-VERSION      = "4.1.0"
+VERSION      = "4.1.1"
+_NO_WINDOW   = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 SCRIPT_DIR   = _base_dir()
 BIN_DIR      = SCRIPT_DIR / "bin"
@@ -34,17 +35,28 @@ def _find_adb() -> str:
         if saved and Path(saved).exists():
             return saved
     # 2. Bundled in bin/
-    bundled = BIN_DIR / "adb.exe"
+    adb_name = "adb.exe" if sys.platform == "win32" else "adb"
+    bundled = BIN_DIR / adb_name
     if bundled.exists():
         return str(bundled)
-    # 3. Common default install locations (Windows)
-    lappdata = os.environ.get("LOCALAPPDATA", "")
-    for candidate in [
-        Path(lappdata) / "Android/Sdk/platform-tools/adb.exe",
-        Path(os.environ.get("PROGRAMFILES", "")) / "Android/android-sdk/platform-tools/adb.exe",
-        Path(os.environ.get("PROGRAMFILES(X86)", "")) / "Android/android-sdk/platform-tools/adb.exe",
-        Path("C:/platform-tools/adb.exe"),
-    ]:
+    # 3. Common default install locations
+    if sys.platform == "win32":
+        lappdata = os.environ.get("LOCALAPPDATA", "")
+        candidates = [
+            Path(lappdata) / "Android/Sdk/platform-tools/adb.exe",
+            Path(os.environ.get("PROGRAMFILES", "")) / "Android/android-sdk/platform-tools/adb.exe",
+            Path(os.environ.get("PROGRAMFILES(X86)", "")) / "Android/android-sdk/platform-tools/adb.exe",
+            Path("C:/platform-tools/adb.exe"),
+        ]
+    else:
+        home = Path.home()
+        candidates = [
+            home / "Library/Android/sdk/platform-tools/adb",
+            home / "Android/Sdk/platform-tools/adb",
+            Path("/usr/local/bin/adb"),
+            Path("/opt/homebrew/bin/adb"),
+        ]
+    for candidate in candidates:
         if candidate.exists():
             return str(candidate)
     # 4. PATH
@@ -78,7 +90,7 @@ def adb(*args, serial=None, timeout=10):
     _log_adb(cmd[1:])
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
-                           creationflags=subprocess.CREATE_NO_WINDOW)
+                           creationflags=_NO_WINDOW)
         return (r.stdout + r.stderr).strip()
     except subprocess.TimeoutExpired:
         return "TIMEOUT"
@@ -226,7 +238,7 @@ def scan_mdns():
         return results
     try:
         r = subprocess.run([ADB, "mdns", "services"], capture_output=True, text=True, timeout=5,
-                           creationflags=subprocess.CREATE_NO_WINDOW)
+                           creationflags=_NO_WINDOW)
         for line in (r.stdout + r.stderr).splitlines():
             # format: <name>  _adb-tls-connect._tcp  <ip>:<port>
             if "_adb-tls-connect" in line:
@@ -918,7 +930,7 @@ class App(ctk.CTk):
             return
         try:
             subprocess.Popen([scrcpy, "--serial", self.serial],
-                             creationflags=subprocess.CREATE_NO_WINDOW)
+                             creationflags=_NO_WINDOW)
             self._log("ScrCpy launched.")
         except Exception as e:
             self._log(f"Failed to launch scrcpy: {e}")
@@ -1195,14 +1207,20 @@ class App(ctk.CTk):
         path_row.pack(fill="x", padx=20, pady=(0, 14))
         path_row.grid_columnconfigure(0, weight=1)
         path_var = StringVar()
+        _placeholder = ("Path to adb.exe  (e.g. C:\\platform-tools\\adb.exe)"
+                        if sys.platform == "win32"
+                        else "Path to adb  (e.g. /usr/local/bin/adb)")
         path_entry = ctk.CTkEntry(path_row, textvariable=path_var,
-                                  placeholder_text="Path to adb.exe  (e.g. C:\\platform-tools\\adb.exe)")
+                                  placeholder_text=_placeholder)
         path_entry.grid(row=0, column=0, sticky="ew", padx=(0, 8))
 
         def browse():
+            _filetypes = ([("ADB executable", "adb.exe"), ("All files", "*.*")]
+                          if sys.platform == "win32"
+                          else [("All files", "*")])
             p = filedialog.askopenfilename(
-                title="Locate adb.exe",
-                filetypes=[("ADB executable", "adb.exe"), ("All files", "*.*")])
+                title="Locate adb",
+                filetypes=_filetypes)
             if p:
                 path_var.set(p)
 

@@ -1,4 +1,4 @@
-# Android TV Tools v4.1.0
+# Android TV Tools v4.1.1
 
 A Python/CustomTkinter desktop GUI for managing Android TV and Google TV devices over ADB — no terminal required. Scan your network, manage packages, tune performance, sideload APKs, and capture screenshots from a single window.
 
@@ -42,6 +42,9 @@ Settings → Device Preferences → About → click **Build** 7× to unlock Deve
 
 **Pre-built Windows exe**
 Download the latest release from the [Releases](../../releases) page, unzip, and run `Android TV Tools.exe`.
+
+**Pre-built macOS app**
+Download `AndroidTVTools.dmg` from the [Releases](../../releases) page, open it, and drag the app to your Applications folder. ADB is bundled — no separate install needed.
 
 ---
 
