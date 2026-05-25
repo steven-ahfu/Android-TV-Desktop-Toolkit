@@ -1,4 +1,4 @@
-# Build Android TV Tools as a standalone Windows exe via PyInstaller.
+# Build Android TV Desktop Toolkit as a standalone Windows exe via PyInstaller.
 # Run from the repo root: .\scripts\build.ps1
 #
 # Requirements:
@@ -20,21 +20,21 @@ $venvPyInstaller = "$root\.venv\Scripts\pyinstaller.exe"
     --noconfirm `
     --onefile `
     --windowed `
-    --name "Android TV Tools" `
+    --name "Android TV Desktop Toolkit" `
     --icon "$root\assets\icon.ico" `
     --add-data "$root\assets;assets" `
     --add-data "$(& $venvPython -c 'import customtkinter, os; print(os.path.dirname(customtkinter.__file__))');customtkinter" `
     "$root\android_tv_tools.py"
 
 Write-Output ""
-Write-Output "Build complete. Output: dist\Android TV Tools.exe"
+Write-Output "Build complete. Output: dist\Android TV Desktop Toolkit.exe"
 
 # Create desktop shortcut pointing to the built exe
-$exe = "$root\dist\Android TV Tools.exe"
+$exe = "$root\dist\Android TV Desktop Toolkit.exe"
 $ws = New-Object -ComObject WScript.Shell
-$sc = $ws.CreateShortcut("$env:USERPROFILE\Desktop\Android TV Tools.lnk")
+$sc = $ws.CreateShortcut("$env:USERPROFILE\Desktop\Android TV Desktop Toolkit.lnk")
 $sc.TargetPath       = $exe
 $sc.WorkingDirectory = "$root\dist"
-$sc.Description      = "Android TV Tools"
+$sc.Description      = "Android TV Desktop Toolkit"
 $sc.Save()
 Write-Output "Shortcut created -> Desktop."

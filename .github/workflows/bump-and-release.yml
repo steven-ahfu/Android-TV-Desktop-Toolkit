@@ -1,0 +1,130 @@
+name: Bump and Release
+
+on:
+  workflow_dispatch:
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      new_version: ${{ steps.bump.outputs.new_version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Bump patch version
+        id: bump
+        run: |
+          VERSION=$(grep '^version = ' pyproject.toml | sed 's/version = "\(.*\)"/\1/')
+          IFS='.' read -r major minor patch <<< "$VERSION"
+          patch=$((patch + 1))
+          NEW_VERSION="$major.$minor.$patch"
+          sed -i "s/^version = \".*\"/version = \"$NEW_VERSION\"/" pyproject.toml
+          sed -i 's/^VERSION *=.*/VERSION      = "'"$NEW_VERSION"'"/' android_tv_tools.py
+          echo "new_version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Commit and tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add pyproject.toml android_tv_tools.py
+          git commit -m "v${{ steps.bump.outputs.new_version }}: bump version"
+          git tag "v${{ steps.bump.outputs.new_version }}"
+          git push origin HEAD:main --tags
+
+  build-windows:
+    needs: bump
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v${{ needs.bump.outputs.new_version }}
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: uv sync --all-groups
+
+      - name: Download Windows ADB
+        run: |
+          Invoke-WebRequest https://dl.google.com/android/repository/platform-tools-latest-windows.zip -OutFile platform-tools.zip
+          Expand-Archive platform-tools.zip -DestinationPath platform-tools-extracted
+          New-Item -ItemType Directory -Force -Path bin | Out-Null
+          Copy-Item platform-tools-extracted\platform-tools\adb.exe bin\adb.exe
+
+      - name: Build exe
+        run: |
+          uv run pyinstaller `
+            --noconfirm `
+            --onefile `
+            --windowed `
+            --name "Android TV Desktop Toolkit" `
+            --icon "assets\icon.ico" `
+            --add-data "assets;assets" `
+            --add-data "bin;bin" `
+            --collect-all customtkinter `
+            android_tv_tools.py
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.bump.outputs.new_version }}
+          files: dist\Android TV Desktop Toolkit.exe
+          generate_release_notes: true
+
+  build-macos:
+    needs: bump
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v${{ needs.bump.outputs.new_version }}
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --all-groups
+
+      - name: Download macOS ADB
+        run: |
+          curl -L https://dl.google.com/android/repository/platform-tools-latest-darwin.zip -o platform-tools.zip
+          unzip -q platform-tools.zip platform-tools/adb
+          mkdir -p bin
+          cp platform-tools/adb bin/adb
+          chmod +x bin/adb
+
+      - name: Build .app
+        run: |
+          uv run pyinstaller \
+            --noconfirm \
+            --windowed \
+            --name "Android TV Desktop Toolkit" \
+            --icon "assets/ATV Tools.png" \
+            --add-data "assets:assets" \
+            --add-data "bin:bin" \
+            --collect-all customtkinter \
+            android_tv_tools.py
+
+      - name: Create .dmg
+        run: |
+          hdiutil create \
+            -volname "Android TV Desktop Toolkit" \
+            -srcfolder "dist/Android TV Desktop Toolkit.app" \
+            -ov -format UDZO \
+            "dist/AndroidTVDesktopToolkit.dmg"
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.bump.outputs.new_version }}
+          files: dist/AndroidTVDesktopToolkit.dmg
+          generate_release_notes: false

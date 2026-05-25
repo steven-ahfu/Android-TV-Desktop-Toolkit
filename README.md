@@ -1,8 +1,6 @@
-# Android TV Tools v4.1.3
+# Android TV Desktop Toolkit
 
-A Python/CustomTkinter desktop GUI for managing Android TV and Google TV devices over ADB — no terminal required. Scan your network, manage packages, tune performance, sideload APKs, and capture screenshots from a single window.
-
-> **Unofficial — not affiliated with the [original Android TV Tools](https://xdaforums.com/t/tool-all-in-one-tool-for-windows-android-tv-tools-v4.4648239/)** but heavily inspired by it. I wanted to make a simple GUI wrapper for it, and ended up building this.
+A Python/CustomTkinter desktop app for Windows and MacOS to manage Android TV and Google TV devices over ADB — no terminal required. Scan your network, manage packages, tune performance, sideload APKs, and capture screenshots from a single window.
 
 **What you can do with it:**
 
@@ -40,11 +38,13 @@ Settings → Device Preferences → About → click **Build** 7× to unlock Deve
 
 ## Install
 
-**Pre-built Windows exe**
-Download the latest release from the [Releases](../../releases) page, unzip, and run `Android TV Tools.exe`.
+**Pre-built Windows exe or macOS app**
 
-**Pre-built macOS app**
-Download `AndroidTVTools.dmg` from the [Releases](../../releases) page, open it, and drag the app to your Applications folder. ADB is bundled — no separate install needed.
+- For Windows, download the latest release from the [Releases](../../releases) page, unzip, and run `Android TV Desktop Toolkit.exe`.
+
+- For MacoS, download `AndroidTVDesktopToolkit.dmg` from the [Releases](../../releases) page, open it, and drag the app to your Applications folder.
+
+ADB is bundled — no separate install needed.
 
 ---
 
@@ -65,13 +65,13 @@ Requires Python 3.12 or 3.13 (PyInstaller does not yet fully support 3.14):
 .\scripts\build.ps1
 ```
 
-Output lands in `dist/Android TV Tools/`. Zip that folder for distribution.
+Output lands in `dist/Android TV Desktop Toolkit/`. Zip that folder for distribution.
 
 ---
 
 ## Attribution
 
-This project is a simple GUI reimplementation of [**Android TV Tools v4.0** by **bernarbernuli**](https://xdaforums.com/t/tool-all-in-one-tool-for-windows-android-tv-tools-v4.4648239/).
+This project is an unaffiliated simple GUI reimplementation of [**Android TV Tools v4.0** by **bernarbernuli**](https://xdaforums.com/t/tool-all-in-one-tool-for-windows-android-tv-tools-v4.4648239/).
 
 The original is a Windows batch-script compiled to an executable. This project was written from scratch in Python using CustomTkinter; no original source code was copied. All ADB commands (`adb shell pm`, `adb install`, etc.) are standard Android Debug Bridge invocations documented by Google.
 

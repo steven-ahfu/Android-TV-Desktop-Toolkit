@@ -1,5 +1,5 @@
 [project]
-name = "android-tv-tools"
+name = "android-tv-desktop-toolkit"
 version = "4.1.3"
 requires-python = ">=3.10"
 dependencies = [
@@ -13,5 +13,3 @@ dev = [
     "pyinstaller",
 ]
 
-[project.scripts]
-android-tv-tools = "android_tv_tools:main"

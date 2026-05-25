@@ -34,7 +34,7 @@ jobs:
             --noconfirm `
             --onefile `
             --windowed `
-            --name "Android TV Tools" `
+            --name "Android TV Desktop Toolkit" `
             --icon "assets\icon.ico" `
             --add-data "assets;assets" `
             --add-data "bin;bin" `
@@ -44,5 +44,5 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist\Android TV Tools.exe
+          files: dist\Android TV Desktop Toolkit.exe
           generate_release_notes: true

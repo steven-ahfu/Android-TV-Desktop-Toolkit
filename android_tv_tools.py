@@ -506,7 +506,7 @@ class App(ctk.CTk):
         ctk.set_default_color_theme("blue")
         self.configure(fg_color=APP_BG)
 
-        self.title(f"Android TV Tools v{VERSION}")
+        self.title(f"Android TV Desktop Toolkit v{VERSION}")
         self.geometry("1100x700")
         self.minsize(900, 600)
         _icon = SCRIPT_DIR / "assets" / "icon.ico"
@@ -2227,7 +2227,7 @@ class App(ctk.CTk):
                 self._log("Fetching latest Shizuku release from GitHub...")
                 req = urllib.request.Request(
                     "https://api.github.com/repos/RikkaApps/Shizuku/releases/latest",
-                    headers={"User-Agent": "AndroidTVTools/4.0", "Accept": "application/vnd.github+json"})
+                    headers={"User-Agent": f"AndroidTVDesktopToolkit/{VERSION}", "Accept": "application/vnd.github+json"})
                 with urllib.request.urlopen(req, timeout=15) as resp:
                     data = _json.loads(resp.read())
                 apk_url = next(
@@ -2310,7 +2310,7 @@ class App(ctk.CTk):
                 if meta.get("gitlab"):
                     # Aurora Store on GitLab
                     api = "https://gitlab.com/api/v4/projects/AuroraOSS%2FAuroraStore/releases"
-                    req = urllib.request.Request(api, headers={"User-Agent": "AndroidTVTools/4.1"})
+                    req = urllib.request.Request(api, headers={"User-Agent": f"AndroidTVDesktopToolkit/{VERSION}"})
                     with urllib.request.urlopen(req, timeout=15) as resp:
                         data = _json.loads(resp.read())
                     # find first .apk asset link
@@ -2324,7 +2324,7 @@ class App(ctk.CTk):
                     repo = meta["repo"]
                     api = f"https://api.github.com/repos/{repo}/releases/latest"
                     req = urllib.request.Request(api, headers={
-                        "User-Agent": "AndroidTVTools/4.1",
+                        "User-Agent": f"AndroidTVDesktopToolkit/{VERSION}",
                         "Accept": "application/vnd.github+json"})
                     with urllib.request.urlopen(req, timeout=15) as resp:
                         data = _json.loads(resp.read())

@@ -41,7 +41,7 @@ jobs:
           uv run pyinstaller \
             --noconfirm \
             --windowed \
-            --name "Android TV Tools" \
+            --name "Android TV Desktop Toolkit" \
             --icon "assets/ATV Tools.png" \
             --add-data "assets:assets" \
             --add-data "bin:bin" \
@@ -51,21 +51,21 @@ jobs:
       - name: Create .dmg
         run: |
           hdiutil create \
-            -volname "Android TV Tools" \
-            -srcfolder "dist/Android TV Tools.app" \
+            -volname "Android TV Desktop Toolkit" \
+            -srcfolder "dist/Android TV Desktop Toolkit.app" \
             -ov -format UDZO \
-            "dist/AndroidTVTools.dmg"
+            "dist/AndroidTVDesktopToolkit.dmg"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: AndroidTVTools-macOS
-          path: dist/AndroidTVTools.dmg
+          name: AndroidTVDesktopToolkit-macOS
+          path: dist/AndroidTVDesktopToolkit.dmg
           retention-days: 30
 
       - name: Attach to GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/AndroidTVTools.dmg
+          files: dist/AndroidTVDesktopToolkit.dmg
           generate_release_notes: false
