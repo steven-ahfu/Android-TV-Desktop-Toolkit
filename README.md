@@ -1,4 +1,4 @@
-# Android TV Tools v4.1.1
+# Android TV Tools v4.1.3
 
 A Python/CustomTkinter desktop GUI for managing Android TV and Google TV devices over ADB — no terminal required. Scan your network, manage packages, tune performance, sideload APKs, and capture screenshots from a single window.
 

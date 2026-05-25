@@ -19,7 +19,7 @@ def _base_dir() -> Path:
         return Path(sys.executable).parent
     return Path(__file__).parent
 
-VERSION      = "4.1.1"
+VERSION      = "4.1.3"
 _NO_WINDOW   = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 SCRIPT_DIR   = _base_dir()
@@ -99,6 +99,16 @@ def adb(*args, serial=None, timeout=10):
 
 def adb_out(*args, serial=None, timeout=10):
     return adb(*args, serial=serial, timeout=timeout)
+
+def _clean_prop(raw: str) -> str:
+    """Return the first meaningful line from an adb getprop result.
+    Guards against ADB daemon startup messages in stderr being concatenated
+    to the actual property value by adb() which joins stdout+stderr."""
+    for line in raw.splitlines():
+        cleaned = line.strip()
+        if cleaned and not cleaned.startswith("*"):
+            return cleaned
+    return raw.strip()
 
 # ── device history (JSON) ──────────────────────────────────────────────────────
 import re as _re
@@ -256,12 +266,245 @@ def scan_mdns():
         pass
     return results
 
+# ── One Dark design tokens ─────────────────────────────────────────────────────
+APP_BG          = "#282c34"
+SIDEBAR_BG      = "#21252b"
+SURFACE_1       = "#2c313c"
+SURFACE_2       = "#333842"
+SURFACE_3       = "#3e4452"
+BORDER          = "#4b5263"
+
+TEXT            = "#abb2bf"
+TEXT_MUTED      = "#7f848e"
+TEXT_DISABLED   = "#5c6370"
+
+PRIMARY         = "#61afef"
+PRIMARY_HOVER   = "#528bff"
+PRIMARY_MUTED   = "#2d425a"
+
+SECONDARY       = "#3e4452"
+SECONDARY_HOVER = "#4b5263"
+
+DANGER          = "#e06c75"
+DANGER_BG       = "#3f2a2e"
+DANGER_HOVER    = "#4a3035"
+
+SUCCESS         = "#98c379"
+SUCCESS_BG      = "#2f3f32"
+SUCCESS_HOVER   = "#3a5040"
+
+WARNING         = "#e5c07b"
+INFO            = "#56b6c2"
+PURPLE          = "#c678dd"
+
+RADIUS_SM   = 8
+RADIUS_MD   = 12
+RADIUS_LG   = 18
+RADIUS_XL   = 24
+RADIUS_PILL = 999
+
+PAD_SM = 8
+PAD_MD = 12
+PAD_LG = 16
+PAD_XL = 24
+
+_FONT = "Helvetica"
+
+
+class Panel(ctk.CTkFrame):
+    def __init__(self, master, **kwargs):
+        super().__init__(
+            master,
+            fg_color=kwargs.pop("fg_color", SURFACE_1),
+            corner_radius=kwargs.pop("corner_radius", RADIUS_XL),
+            border_width=kwargs.pop("border_width", 1),
+            border_color=kwargs.pop("border_color", BORDER),
+            **kwargs,
+        )
+
+
+class PrimaryButton(ctk.CTkButton):
+    def __init__(self, master, **kwargs):
+        super().__init__(
+            master,
+            height=kwargs.pop("height", 40),
+            corner_radius=kwargs.pop("corner_radius", RADIUS_MD),
+            fg_color=kwargs.pop("fg_color", PRIMARY),
+            hover_color=kwargs.pop("hover_color", PRIMARY_HOVER),
+            text_color=kwargs.pop("text_color", APP_BG),
+            font=kwargs.pop("font", ctk.CTkFont(family=_FONT, size=13, weight="bold")),
+            **kwargs,
+        )
+
+
+class SecondaryButton(ctk.CTkButton):
+    def __init__(self, master, **kwargs):
+        super().__init__(
+            master,
+            height=kwargs.pop("height", 40),
+            corner_radius=kwargs.pop("corner_radius", RADIUS_MD),
+            fg_color=kwargs.pop("fg_color", SURFACE_2),
+            hover_color=kwargs.pop("hover_color", SURFACE_3),
+            text_color=kwargs.pop("text_color", TEXT),
+            border_width=kwargs.pop("border_width", 1),
+            border_color=kwargs.pop("border_color", BORDER),
+            font=kwargs.pop("font", ctk.CTkFont(family=_FONT, size=13)),
+            **kwargs,
+        )
+
+
+class SuccessButton(ctk.CTkButton):
+    def __init__(self, master, **kwargs):
+        super().__init__(
+            master,
+            height=kwargs.pop("height", 40),
+            corner_radius=kwargs.pop("corner_radius", RADIUS_MD),
+            fg_color=kwargs.pop("fg_color", SUCCESS_BG),
+            hover_color=kwargs.pop("hover_color", SUCCESS_HOVER),
+            text_color=kwargs.pop("text_color", SUCCESS),
+            border_width=kwargs.pop("border_width", 1),
+            border_color=kwargs.pop("border_color", "#3d5a3f"),
+            font=kwargs.pop("font", ctk.CTkFont(family=_FONT, size=13, weight="bold")),
+            **kwargs,
+        )
+
+
+class DangerButton(ctk.CTkButton):
+    def __init__(self, master, **kwargs):
+        super().__init__(
+            master,
+            height=kwargs.pop("height", 40),
+            corner_radius=kwargs.pop("corner_radius", RADIUS_MD),
+            fg_color=kwargs.pop("fg_color", DANGER_BG),
+            hover_color=kwargs.pop("hover_color", DANGER_HOVER),
+            text_color=kwargs.pop("text_color", DANGER),
+            border_width=kwargs.pop("border_width", 1),
+            border_color=kwargs.pop("border_color", "#5a3439"),
+            font=kwargs.pop("font", ctk.CTkFont(family=_FONT, size=13, weight="bold")),
+            **kwargs,
+        )
+
+
+class ChipButton(ctk.CTkButton):
+    def __init__(self, master, selected: bool = False, **kwargs):
+        super().__init__(
+            master,
+            height=kwargs.pop("height", 34),
+            corner_radius=kwargs.pop("corner_radius", RADIUS_PILL),
+            fg_color=kwargs.pop("fg_color", PRIMARY_MUTED if selected else SURFACE_1),
+            hover_color=kwargs.pop("hover_color", SURFACE_3),
+            text_color=kwargs.pop("text_color", PRIMARY if selected else TEXT_MUTED),
+            border_width=kwargs.pop("border_width", 1),
+            border_color=kwargs.pop("border_color", PRIMARY if selected else BORDER),
+            font=kwargs.pop("font", ctk.CTkFont(family=_FONT, size=13)),
+            **kwargs,
+        )
+
+
+class EmptyState(ctk.CTkFrame):
+    def __init__(self, master, title="No data", subtitle="", **kwargs):
+        super().__init__(master, fg_color=kwargs.pop("fg_color", "transparent"), **kwargs)
+        ctk.CTkLabel(
+            self, text=title,
+            font=ctk.CTkFont(family=_FONT, size=14, weight="bold"),
+            text_color=TEXT_DISABLED,
+        ).pack(pady=(0, 4))
+        if subtitle:
+            ctk.CTkLabel(
+                self, text=subtitle,
+                font=ctk.CTkFont(family=_FONT, size=12),
+                text_color=TEXT_DISABLED,
+            ).pack()
+
+
+class _RoundEntry(ctk.CTkEntry):
+    def __init__(self, master, **kw):
+        super().__init__(master,
+            corner_radius=kw.pop("corner_radius", RADIUS_SM),
+            height=kw.pop("height", 36),
+            fg_color=kw.pop("fg_color", SIDEBAR_BG),
+            border_color=kw.pop("border_color", BORDER),
+            border_width=kw.pop("border_width", 1),
+            text_color=kw.pop("text_color", TEXT),
+            placeholder_text_color=kw.pop("placeholder_text_color", TEXT_DISABLED), **kw)
+
+
+class TabBar(ctk.CTkFrame):
+    def __init__(self, master, **kwargs):
+        super().__init__(
+            master,
+            fg_color=kwargs.pop("fg_color", SURFACE_1),
+            corner_radius=kwargs.pop("corner_radius", 18),
+            border_width=kwargs.pop("border_width", 1),
+            border_color=kwargs.pop("border_color", BORDER),
+            **kwargs,
+        )
+
+
+class TabButton(ctk.CTkButton):
+    def __init__(self, master, selected: bool = False, **kwargs):
+        super().__init__(
+            master,
+            height=kwargs.pop("height", 38),
+            corner_radius=kwargs.pop("corner_radius", 14),
+            fg_color=kwargs.pop("fg_color", SURFACE_3 if selected else "transparent"),
+            hover_color=kwargs.pop("hover_color", SURFACE_2),
+            text_color=kwargs.pop("text_color", PRIMARY if selected else TEXT),
+            text_color_disabled=kwargs.pop("text_color_disabled", TEXT_DISABLED),
+            border_width=kwargs.pop("border_width", 1 if selected else 0),
+            border_color=kwargs.pop("border_color", BORDER),
+            font=kwargs.pop(
+                "font",
+                ctk.CTkFont(family=_FONT, size=13, weight="bold" if selected else "normal"),
+            ),
+            **kwargs,
+        )
+
+
+class StatusDot(ctk.CTkFrame):
+    def __init__(self, master, online: bool = False, **kwargs):
+        super().__init__(
+            master,
+            width=kwargs.pop("width", 18),
+            height=kwargs.pop("height", 18),
+            corner_radius=kwargs.pop("corner_radius", 9),
+            fg_color=kwargs.pop("fg_color", PRIMARY_MUTED if online else "transparent"),
+            border_width=kwargs.pop("border_width", 1),
+            border_color=kwargs.pop("border_color", PRIMARY if online else TEXT_DISABLED),
+            **kwargs,
+        )
+        self.pack_propagate(False)
+        inner = ctk.CTkFrame(
+            self,
+            width=7,
+            height=7,
+            corner_radius=4,
+            fg_color=PRIMARY if online else TEXT_DISABLED,
+        )
+        inner.place(relx=0.5, rely=0.5, anchor="center")
+
+
+def _scrollable(parent, **kwargs):
+    """Return a CTkScrollableFrame filling parent, themed for One Dark."""
+    sf = ctk.CTkScrollableFrame(
+        parent,
+        fg_color=kwargs.pop("fg_color", "transparent"),
+        corner_radius=kwargs.pop("corner_radius", 0),
+        scrollbar_button_color=kwargs.pop("scrollbar_button_color", SURFACE_3),
+        scrollbar_button_hover_color=kwargs.pop("scrollbar_button_hover_color", SECONDARY_HOVER),
+        **kwargs,
+    )
+    sf.pack(fill="both", expand=True)
+    return sf
+
+
 # ── main app ───────────────────────────────────────────────────────────────────
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
+        self.configure(fg_color=APP_BG)
 
         self.title(f"Android TV Tools v{VERSION}")
         self.geometry("1100x700")
@@ -270,12 +513,22 @@ class App(ctk.CTk):
         if _icon.exists():
             self.iconbitmap(str(_icon))
 
-        self.serial = None          # connected device serial (ip:5555)
+        self.serial = None
         self.history = load_history()
 
         self._build_ui()
         self._populate_device_list()
+        self.after(200, self._apply_mica)
         self._start_adb_server()
+
+    def _apply_mica(self):
+        try:
+            import pywinstyles
+            pywinstyles.apply_style(self, "mica")
+            pywinstyles.change_header_color(self, APP_BG)
+            pywinstyles.change_title_color(self, TEXT)
+        except Exception:
+            pass
 
     # ── UI build ───────────────────────────────────────────────────────────────
     def _build_ui(self):
@@ -283,98 +536,126 @@ class App(ctk.CTk):
         self.grid_rowconfigure(0, weight=1)
 
         # ── left panel ─────────────────────────────────────────────────────────
-        left = ctk.CTkFrame(self, width=240, corner_radius=0)
+        left = ctk.CTkFrame(self, width=240, corner_radius=0, fg_color=SIDEBAR_BG)
         left.grid(row=0, column=0, sticky="nsew")
         left.grid_columnconfigure(0, weight=1)
         left.grid_rowconfigure(4, weight=1)
 
-        ctk.CTkLabel(left, text="Devices", font=ctk.CTkFont(size=14, weight="bold")).grid(
-            row=0, column=0, padx=10, pady=(12, 4), sticky="w")
+        ctk.CTkLabel(left, text="Devices",
+                     font=ctk.CTkFont(family=_FONT, size=16, weight="bold"),
+                     text_color=TEXT).grid(
+            row=0, column=0, padx=14, pady=(16, 6), sticky="w")
 
         # subnet scan row
         subnet_row = ctk.CTkFrame(left, fg_color="transparent")
-        subnet_row.grid(row=1, column=0, padx=8, pady=(0, 2), sticky="ew")
+        subnet_row.grid(row=1, column=0, padx=10, pady=(0, 4), sticky="ew")
         subnet_row.grid_columnconfigure(1, weight=1)
-        ctk.CTkLabel(subnet_row, text="Subnet:", font=ctk.CTkFont(size=11),
-                     text_color="gray").grid(row=0, column=0, padx=(0, 4))
+        ctk.CTkLabel(subnet_row, text="Subnet:", font=ctk.CTkFont(family=_FONT, size=11),
+                     text_color=TEXT_DISABLED).grid(row=0, column=0, padx=(0, 6))
         self._subnet_var = StringVar(value="192.168.1")
-        ctk.CTkEntry(subnet_row, textvariable=self._subnet_var,
-                     font=ctk.CTkFont(size=11), height=26).grid(row=0, column=1, sticky="ew")
+        _RoundEntry(subnet_row, textvariable=self._subnet_var,
+                    font=ctk.CTkFont(family=_FONT, size=11), height=30).grid(row=0, column=1, sticky="ew")
 
         scan_btn_row = ctk.CTkFrame(left, fg_color="transparent")
-        scan_btn_row.grid(row=2, column=0, padx=8, pady=2, sticky="ew")
+        scan_btn_row.grid(row=2, column=0, padx=10, pady=4, sticky="ew")
         scan_btn_row.grid_columnconfigure(0, weight=1)
-        self.scan_btn = ctk.CTkButton(scan_btn_row, text="Scan Network", height=30,
-                                      command=self._scan)
-        self.scan_btn.grid(row=0, column=0, sticky="ew", padx=(0, 4))
-        ctk.CTkButton(scan_btn_row, text="mDNS", width=54, height=30,
-                      fg_color="gray40", command=self._scan_mdns).grid(row=0, column=1)
+        self.scan_btn = SecondaryButton(scan_btn_row, text="Scan Network", height=34,
+                                        command=self._scan)
+        self.scan_btn.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        SecondaryButton(scan_btn_row, text="mDNS", width=56, height=34,
+                        command=self._scan_mdns).grid(row=0, column=1)
 
-        self.scan_status = ctk.CTkLabel(left, text="", text_color="gray", font=ctk.CTkFont(size=10))
-        self.scan_status.grid(row=3, column=0, padx=10, pady=0, sticky="w")
+        self.scan_status = ctk.CTkLabel(left, text="", text_color=TEXT_DISABLED,
+                                         font=ctk.CTkFont(family=_FONT, size=10))
+        self.scan_status.grid(row=3, column=0, padx=12, pady=0, sticky="w")
 
-        # device list
-        self.device_list = ctk.CTkScrollableFrame(left, label_text="")
+        self.device_list = ctk.CTkScrollableFrame(left, label_text="",
+                                                   fg_color="transparent")
         self.device_list.grid(row=4, column=0, padx=6, pady=4, sticky="nsew")
         self.device_list.grid_columnconfigure(0, weight=1)
 
         # connect / disconnect
         conn_row = ctk.CTkFrame(left, fg_color="transparent")
-        conn_row.grid(row=5, column=0, padx=8, pady=4, sticky="ew")
+        conn_row.grid(row=5, column=0, padx=10, pady=6, sticky="ew")
         conn_row.grid_columnconfigure(0, weight=1)
-        self.connect_btn = ctk.CTkButton(conn_row, text="Connect", fg_color="green",
-                                         height=32, command=self._connect)
-        self.connect_btn.grid(row=0, column=0, sticky="ew", padx=(0, 4))
-        self.disconnect_btn = ctk.CTkButton(conn_row, text="⏏", width=36, height=32,
-                                             fg_color="gray40", command=self._disconnect)
+        self.connect_btn = PrimaryButton(conn_row, text="Connect", height=38,
+                                          corner_radius=RADIUS_PILL,
+                                          command=self._connect)
+        self.connect_btn.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        self.disconnect_btn = SecondaryButton(conn_row, text="⏏", width=38, height=38,
+                                               command=self._disconnect)
         self.disconnect_btn.grid(row=0, column=1)
 
-        # manual IP entry
-        ctk.CTkFrame(left, height=1, fg_color="gray30").grid(
-            row=6, column=0, padx=10, pady=(2, 4), sticky="ew")
+        # divider
+        ctk.CTkFrame(left, height=1, fg_color=BORDER).grid(
+            row=6, column=0, padx=10, pady=(4, 6), sticky="ew")
+
         ctk.CTkLabel(left, text="Manual / Direct Connect",
-                     font=ctk.CTkFont(size=10), text_color="gray").grid(
-                     row=7, column=0, padx=10, pady=(0, 2), sticky="w")
+                     font=ctk.CTkFont(family=_FONT, size=10), text_color=TEXT_DISABLED).grid(
+                     row=7, column=0, padx=12, pady=(0, 4), sticky="w")
         manual_row = ctk.CTkFrame(left, fg_color="transparent")
-        manual_row.grid(row=8, column=0, padx=8, pady=(0, 2), sticky="ew")
+        manual_row.grid(row=8, column=0, padx=10, pady=(0, 4), sticky="ew")
         manual_row.grid_columnconfigure(0, weight=1)
         self._manual_ip_var = StringVar()
-        ctk.CTkEntry(manual_row, textvariable=self._manual_ip_var,
-                     placeholder_text="192.168.1.x", height=26,
-                     font=ctk.CTkFont(size=11)).grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        _RoundEntry(manual_row, textvariable=self._manual_ip_var,
+                    placeholder_text="192.168.1.x", height=30,
+                    font=ctk.CTkFont(family=_FONT, size=11)).grid(row=0, column=0, sticky="ew", padx=(0, 4))
         self._manual_port_var = StringVar(value="5555")
-        ctk.CTkEntry(manual_row, textvariable=self._manual_port_var,
-                     width=48, height=26, font=ctk.CTkFont(size=11)).grid(row=0, column=1)
-        ctk.CTkButton(left, text="Connect to IP", height=28,
-                      command=self._connect_manual).grid(
-                      row=9, column=0, padx=8, pady=(2, 2), sticky="ew")
-
-        # wireless debug pairing (Android 11+)
-        ctk.CTkButton(left, text="Pair (Android 11+ Wireless)", height=28,
-                      fg_color="#1a4a6a",
-                      command=self._open_pair_dialog).grid(
-                      row=10, column=0, padx=8, pady=(0, 10), sticky="ew")
+        _RoundEntry(manual_row, textvariable=self._manual_port_var,
+                    width=50, height=30, font=ctk.CTkFont(family=_FONT, size=11)).grid(row=0, column=1)
+        SecondaryButton(left, text="Connect to IP", height=32,
+                        command=self._connect_manual).grid(
+                        row=9, column=0, padx=10, pady=(2, 4), sticky="ew")
+        SecondaryButton(left, text="Pair (Android 11+ Wireless)", height=32,
+                        text_color=PRIMARY, border_color=PRIMARY_MUTED,
+                        command=self._open_pair_dialog).grid(
+                        row=10, column=0, padx=10, pady=(0, 12), sticky="ew")
 
         self.selected_ip = StringVar(value="")
         self._device_radio_buttons = []
 
         # ── right panel ────────────────────────────────────────────────────────
-        right = ctk.CTkFrame(self, corner_radius=0)
+        right = ctk.CTkFrame(self, corner_radius=0, fg_color=APP_BG)
         right.grid(row=0, column=1, sticky="nsew")
         right.grid_rowconfigure(1, weight=1)
         right.grid_columnconfigure(0, weight=1)
 
-        # status bar top
-        self.status_label = ctk.CTkLabel(right, text="Not connected",
-                                          font=ctk.CTkFont(size=13, weight="bold"),
-                                          text_color="gray")
-        self.status_label.grid(row=0, column=0, padx=14, pady=(10, 2), sticky="w")
+        # ── custom tab bar ──────────────────────────────────────────────────────
+        tab_bar_row = ctk.CTkFrame(right, fg_color="transparent")
+        tab_bar_row.grid(row=0, column=0, padx=0, pady=(6, 0), sticky="ew")
+        tab_bar_row.grid_columnconfigure(0, weight=1)
 
-        # tabs
-        self.tabs = ctk.CTkTabview(right)
-        self.tabs.grid(row=1, column=0, padx=8, pady=4, sticky="nsew")
-        for name in ("Info", "Packages", "Performance", "Install", "Settings", "Tools", "Media", "Remote", "Screenshot"):
-            self.tabs.add(name)
+        self._tab_bar = TabBar(tab_bar_row)
+        self._tab_bar.grid(row=0, column=0, padx=(8, 22), sticky="ew")
+
+        # tab content area
+        self._tab_content_area = ctk.CTkFrame(right, fg_color=APP_BG, corner_radius=0)
+        self._tab_content_area.grid(row=1, column=0, padx=0, pady=0, sticky="nsew")
+        self._tab_content_area.grid_columnconfigure(0, weight=1)
+        self._tab_content_area.grid_rowconfigure(0, weight=1)
+
+        self._tab_frames: dict = {}
+        self._tab_buttons: dict = {}
+        self._active_tab: str | None = None
+
+        _TAB_NAMES = ("Info", "Packages", "Performance", "Install", "Settings",
+                      "Tools", "Media", "Remote", "Screenshot")
+        for name in _TAB_NAMES:
+            btn = TabButton(
+                self._tab_bar,
+                text=name,
+                selected=False,
+                command=lambda n=name: self._switch_tab(n),
+                width=max(80, len(name) * 9 + 24),
+            )
+            btn.pack(side="left", padx=4, pady=6)
+            self._tab_buttons[name] = btn
+
+            frame = ctk.CTkFrame(self._tab_content_area, fg_color=APP_BG, corner_radius=0)
+            frame.grid(row=0, column=0, sticky="nsew")
+            frame.grid_remove()
+            frame.grid_columnconfigure(0, weight=1)
+            self._tab_frames[name] = frame
 
         self._build_info_tab()
         self._build_packages_tab()
@@ -385,28 +666,80 @@ class App(ctk.CTk):
         self._build_media_tab()
         self._build_remote_tab()
         self._build_screenshot_tab()
+        self._switch_tab("Info")
+        self._set_tabs_enabled(False)
 
-        # log area
-        log_frame = ctk.CTkFrame(right, height=160, corner_radius=6)
-        log_frame.grid(row=2, column=0, padx=8, pady=(0, 8), sticky="ew")
-        log_frame.grid_columnconfigure(0, weight=1)
-        log_frame.grid_rowconfigure(1, weight=1)
+        # log area — border turns green when a device is connected
+        self.log_frame = Panel(right, fg_color=SURFACE_1, corner_radius=RADIUS_LG)
+        self.log_frame.grid(row=2, column=0, padx=10, pady=(0, 10), sticky="ew")
+        self.log_frame.grid_columnconfigure(0, weight=1)
 
-        log_header = ctk.CTkFrame(log_frame, fg_color="transparent")
-        log_header.grid(row=0, column=0, padx=8, pady=(4, 0), sticky="ew")
+        log_header = ctk.CTkFrame(self.log_frame, fg_color="transparent")
+        log_header.grid(row=0, column=0, padx=10, pady=(8, 0), sticky="ew")
         log_header.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(log_header, text="Output Log", font=ctk.CTkFont(size=11), text_color="gray").grid(row=0, column=0, sticky="w")
-        self.copy_btn = ctk.CTkButton(log_header, text="Copy", width=52, height=22,
-                                      font=ctk.CTkFont(size=11),
-                                      command=self._copy_log)
+        ctk.CTkLabel(log_header, text="Output Log",
+                     font=ctk.CTkFont(family=_FONT, size=11, weight="bold"),
+                     text_color=TEXT_MUTED).grid(row=0, column=0, sticky="w")
+        self.copy_btn = SecondaryButton(log_header, text="Copy", width=60, height=26,
+                                        font=ctk.CTkFont(family=_FONT, size=11),
+                                        command=self._copy_log)
         self.copy_btn.grid(row=0, column=1, padx=(0, 2))
 
-        self.log_box = ctk.CTkTextbox(log_frame, height=130, font=ctk.CTkFont(family="Consolas", size=11), state="disabled")
-        self.log_box.grid(row=1, column=0, padx=6, pady=(2, 6), sticky="ew")
+        self.log_box = ctk.CTkTextbox(self.log_frame, height=110,
+                                       font=ctk.CTkFont(family="Consolas", size=11),
+                                       fg_color=SIDEBAR_BG,
+                                       text_color=TEXT_MUTED,
+                                       state="disabled")
+        self.log_box.grid(row=1, column=0, padx=8, pady=(4, 8), sticky="ew")
+
+    # ── tab switching ──────────────────────────────────────────────────────────
+    def _switch_tab(self, name: str):
+        if self._active_tab and self._active_tab != name:
+            self._tab_frames[self._active_tab].grid_remove()
+            b = self._tab_buttons[self._active_tab]
+            b.configure(
+                fg_color="transparent",
+                text_color=TEXT,
+                border_width=0,
+                font=ctk.CTkFont(family=_FONT, size=13, weight="normal"),
+            )
+        if self._active_tab != name:
+            self._tab_frames[name].grid()
+            self._tab_buttons[name].configure(
+                fg_color=SURFACE_3,
+                text_color=PRIMARY,
+                border_width=1,
+                font=ctk.CTkFont(family=_FONT, size=13, weight="bold"),
+            )
+            self._active_tab = name
+
+    def _set_tabs_enabled(self, enabled: bool):
+        """Enable or disable all tabs except Info. Switches to Info when disabling."""
+        for name, btn in self._tab_buttons.items():
+            if name == "Info":
+                continue
+            if enabled:
+                is_active = name == self._active_tab
+                btn.configure(
+                    state="normal",
+                    text_color=PRIMARY if is_active else TEXT,
+                    fg_color=SURFACE_3 if is_active else "transparent",
+                    border_width=1 if is_active else 0,
+                    font=ctk.CTkFont(family=_FONT, size=13,
+                                     weight="bold" if is_active else "normal"),
+                )
+            else:
+                btn.configure(state="disabled")
+        if not enabled and self._active_tab != "Info":
+            self._switch_tab("Info")
 
     def _build_info_tab(self):
-        tab = self.tabs.tab("Info")
-        tab.grid_columnconfigure(1, weight=1)
+        tab = _scrollable(self._tab_frames["Info"])
+        tab.grid_columnconfigure(0, weight=1)
+
+        card = Panel(tab)
+        card.grid(row=0, column=0, padx=6, pady=6, sticky="ew")
+        card.grid_columnconfigure(1, weight=1)
 
         fields = [
             ("Manufacturer", "info_manufacturer"),
@@ -422,250 +755,346 @@ class App(ctk.CTk):
             ("Input Method", "info_ime"),
         ]
         for i, (label, attr) in enumerate(fields):
-            ctk.CTkLabel(tab, text=label + ":", anchor="e", width=140).grid(
-                row=i, column=0, padx=(10, 4), pady=5, sticky="e")
-            var = ctk.CTkLabel(tab, text="—", anchor="w")
-            var.grid(row=i, column=1, padx=4, pady=5, sticky="w")
+            ctk.CTkLabel(card, text=label + ":", anchor="e", width=150,
+                         text_color=TEXT_MUTED,
+                         font=ctk.CTkFont(family=_FONT, size=13, weight="bold")).grid(
+                row=i, column=0, padx=(14, 6), pady=6, sticky="e")
+            var = ctk.CTkLabel(card, text="—", anchor="w",
+                               text_color=TEXT, font=ctk.CTkFont(family=_FONT, size=13))
+            var.grid(row=i, column=1, padx=6, pady=6, sticky="w")
             setattr(self, attr, var)
 
-        ctk.CTkButton(tab, text="Refresh Info", command=self._refresh_info).grid(
-            row=len(fields), column=0, columnspan=2, padx=10, pady=12)
+        SecondaryButton(card, text="Refresh Info", command=self._refresh_info, width=140).grid(
+            row=len(fields), column=0, columnspan=2, padx=14, pady=14)
 
     def _build_packages_tab(self):
         import tkinter as tk
-        tab = self.tabs.tab("Packages")
-        tab.grid_columnconfigure(0, weight=1)
-        tab.grid_rowconfigure(1, weight=1)
-        tab.grid_rowconfigure(2, weight=0)
+        import tkinter.ttk as ttk
+        outer = self._tab_frames["Packages"]
 
-        btn_row = ctk.CTkFrame(tab, fg_color="transparent")
-        btn_row.grid(row=0, column=0, sticky="ew", padx=4, pady=6)
+        chip_row = ctk.CTkFrame(outer, fg_color="transparent")
+        chip_row.pack(side="top", fill="x", padx=4, pady=(8, 4))
 
-        ctk.CTkButton(btn_row, text="List System", width=110, command=lambda: self._list_packages("-s")).pack(side="left", padx=3)
-        ctk.CTkButton(btn_row, text="List All", width=100, command=lambda: self._list_packages("")).pack(side="left", padx=3)
-        ctk.CTkButton(btn_row, text="List Uninstalled", width=130, command=lambda: self._list_packages("-u")).pack(side="left", padx=3)
-        ctk.CTkButton(btn_row, text="Play Store", width=100, command=self._list_playstore_pkgs).pack(side="left", padx=3)
-        ctk.CTkButton(btn_row, text="Sideloaded", width=100, command=self._list_sideloaded_pkgs).pack(side="left", padx=3)
+        ChipButton(chip_row, text="List System",
+                   command=lambda: self._list_packages("-s")).pack(side="left", padx=(0, 4))
+        ChipButton(chip_row, text="List All",
+                   command=lambda: self._list_packages("")).pack(side="left", padx=(0, 4))
+        ChipButton(chip_row, text="Uninstalled",
+                   command=lambda: self._list_packages("-u")).pack(side="left", padx=(0, 4))
+        ChipButton(chip_row, text="Play Store",
+                   command=self._list_playstore_pkgs).pack(side="left", padx=(0, 4))
+        ChipButton(chip_row, text="Sideloaded",
+                   command=self._list_sideloaded_pkgs).pack(side="left")
 
-        list_frame = ctk.CTkFrame(tab, corner_radius=6)
-        list_frame.grid(row=1, column=0, padx=6, pady=(0, 4), sticky="nsew")
+        # pack bottom row before the expanding list so it anchors to the bottom
+        action_row = ctk.CTkFrame(outer, fg_color="transparent")
+        action_row.pack(side="bottom", fill="x", padx=4, pady=(0, 6))
+        DangerButton(action_row, text="Uninstall", height=36, width=100,
+                     command=self._pkg_uninstall).pack(side="left", padx=(0, 4))
+        SecondaryButton(action_row, text="Disable", height=36, width=90,
+                        command=self._pkg_disable).pack(side="left", padx=(0, 4))
+        SecondaryButton(action_row, text="Enable", height=36, width=90,
+                        command=self._pkg_enable).pack(side="left", padx=(0, 4))
+        SecondaryButton(action_row, text="Get Version", height=36, width=100,
+                        command=self._pkg_version).pack(side="left", padx=(0, 4))
+        SecondaryButton(action_row, text="Clear Cache", height=36, width=100,
+                        command=self._pkg_clear_cache).pack(side="left", padx=(0, 4))
+        DangerButton(action_row, text="Clear Data", height=36, width=95,
+                     command=self._pkg_clear_data).pack(side="left")
+
+        list_frame = Panel(outer)
+        list_frame.pack(side="top", fill="both", expand=True, padx=6, pady=(0, 4))
         list_frame.grid_columnconfigure(0, weight=1)
         list_frame.grid_rowconfigure(0, weight=1)
 
-        scrollbar = tk.Scrollbar(list_frame, orient="vertical")
-        scrollbar.grid(row=0, column=1, sticky="ns")
+        # Dark-styled scrollbar via ttk
+        _sb_style = ttk.Style()
+        _sb_style.theme_use("default")
+        _sb_style.configure("Dark.Vertical.TScrollbar",
+            background=SURFACE_2, troughcolor=SIDEBAR_BG,
+            bordercolor=BORDER, arrowcolor=TEXT_MUTED,
+            darkcolor=SURFACE_1, lightcolor=SURFACE_2, relief="flat")
+        scrollbar = ttk.Scrollbar(list_frame, orient="vertical", style="Dark.Vertical.TScrollbar")
+        scrollbar.grid(row=0, column=1, sticky="ns", padx=(0, 4), pady=8)
 
         self.pkg_listbox = tk.Listbox(
             list_frame, yscrollcommand=scrollbar.set, selectmode="single",
-            bg="#2b2b2b", fg="#dcdcdc", selectbackground="#1f6aa5", selectforeground="white",
-            font=("Consolas", 11), relief="flat", borderwidth=0, activestyle="none")
-        self.pkg_listbox.grid(row=0, column=0, sticky="nsew")
+            bg=SIDEBAR_BG, fg=TEXT, selectbackground=PRIMARY_MUTED,
+            selectforeground=PRIMARY,
+            font=("Consolas", 11), relief="flat", borderwidth=0,
+            activestyle="none", highlightthickness=0)
+        self.pkg_listbox.grid(row=0, column=0, sticky="nsew", padx=(6, 0), pady=8)
         scrollbar.config(command=self.pkg_listbox.yview)
 
-        action_row = ctk.CTkFrame(tab, fg_color="transparent")
-        action_row.grid(row=2, column=0, sticky="ew", padx=4, pady=(0, 6))
-        ctk.CTkButton(action_row, text="Uninstall", width=100, fg_color="#8B0000",
-                      hover_color="#a00000", command=self._pkg_uninstall).pack(side="left", padx=3)
-        ctk.CTkButton(action_row, text="Disable", width=90,
-                      command=self._pkg_disable).pack(side="left", padx=3)
-        ctk.CTkButton(action_row, text="Enable", width=90,
-                      command=self._pkg_enable).pack(side="left", padx=3)
-        ctk.CTkButton(action_row, text="Get Version", width=100,
-                      command=self._pkg_version).pack(side="left", padx=3)
-        ctk.CTkButton(action_row, text="Clear Cache", width=100,
-                      command=self._pkg_clear_cache).pack(side="left", padx=3)
-        ctk.CTkButton(action_row, text="Clear Data", width=95, fg_color="#5a3000",
-                      hover_color="#7a4000", command=self._pkg_clear_data).pack(side="left", padx=3)
+        # Empty state — shown by default, hidden once packages load
+        self._pkg_empty_state = EmptyState(
+            list_frame,
+            title="No package data loaded",
+            subtitle="Connect to a device, then choose List All.",
+        )
+        self._pkg_empty_state.place(relx=0.5, rely=0.5, anchor="center")
 
     def _build_performance_tab(self):
-        tab = self.tabs.tab("Performance")
-
+        tab = _scrollable(self._tab_frames["Performance"])
         tab.grid_columnconfigure((0, 1), weight=1)
 
         ctk.CTkLabel(tab, text="Performance Optimizations",
-                     font=ctk.CTkFont(size=13, weight="bold")).grid(
-                     row=0, column=0, columnspan=2, pady=(10, 2))
+                     font=ctk.CTkFont(family=_FONT, size=15, weight="bold"),
+                     text_color=TEXT).grid(
+                     row=0, column=0, columnspan=2, pady=(12, 2))
         ctk.CTkLabel(tab, text="Note: Compile Speed Profile can take several minutes.",
-                     text_color="orange", font=ctk.CTkFont(size=11)).grid(
-                     row=1, column=0, columnspan=2, pady=(0, 8))
+                     text_color=WARNING, font=ctk.CTkFont(family=_FONT, size=11)).grid(
+                     row=1, column=0, columnspan=2, pady=(0, 10))
 
-        # left column
-        ctk.CTkButton(tab, text="Compile Speed Profile",
-                      command=self._compile_speed_profile, width=240).grid(row=2, column=0, padx=8, pady=5)
-        ctk.CTkButton(tab, text="Enable App Freezer",
-                      command=self._enable_freezer, width=240).grid(row=3, column=0, padx=8, pady=5)
-        ctk.CTkButton(tab, text="Optimize Touch Response",
-                      command=self._optimize_touch, width=240).grid(row=4, column=0, padx=8, pady=5)
-        ctk.CTkButton(tab, text="All Optimizations",
-                      fg_color="#1f6aa5", command=self._all_optimizations, width=240).grid(row=5, column=0, padx=8, pady=5)
+        left_card = Panel(tab)
+        left_card.grid(row=2, column=0, padx=(8, 4), pady=4, sticky="ew")
 
-        # right column
-        ctk.CTkButton(tab, text="Speed Up Animations (0.5×)",
-                      command=lambda: self._set_animations("0.5"), width=240).grid(row=2, column=1, padx=8, pady=5)
-        ctk.CTkButton(tab, text="Disable Animations",
-                      command=lambda: self._set_animations("0"), width=240).grid(row=3, column=1, padx=8, pady=5)
-        ctk.CTkButton(tab, text="Reset Animations (1×)",
-                      command=lambda: self._set_animations("1"), width=240).grid(row=4, column=1, padx=8, pady=5)
-        ctk.CTkButton(tab, text="Clear All App Caches",
-                      command=self._clear_all_caches, width=240).grid(row=5, column=1, padx=8, pady=5)
-        ctk.CTkButton(tab, text="Kill Background Apps",
-                      command=self._kill_background_apps, width=240).grid(row=6, column=1, padx=8, pady=5)
+        ctk.CTkLabel(left_card, text="Optimizations",
+                     font=ctk.CTkFont(family=_FONT, size=12, weight="bold"),
+                     text_color=TEXT_MUTED).pack(padx=14, pady=(12, 6), anchor="w")
+        PrimaryButton(left_card, text="Compile Speed Profile",
+                      command=self._compile_speed_profile).pack(fill="x", padx=12, pady=4)
+        SecondaryButton(left_card, text="Enable App Freezer",
+                        command=self._enable_freezer).pack(fill="x", padx=12, pady=4)
+        SecondaryButton(left_card, text="Optimize Touch Response",
+                        command=self._optimize_touch).pack(fill="x", padx=12, pady=4)
+        SuccessButton(left_card, text="All Optimizations",
+                      command=self._all_optimizations).pack(fill="x", padx=12, pady=(4, 12))
+
+        right_card = Panel(tab)
+        right_card.grid(row=2, column=1, padx=(4, 8), pady=4, sticky="ew")
+
+        ctk.CTkLabel(right_card, text="Animations & Memory",
+                     font=ctk.CTkFont(family=_FONT, size=12, weight="bold"),
+                     text_color=TEXT_MUTED).pack(padx=14, pady=(12, 6), anchor="w")
+        SecondaryButton(right_card, text="Speed Up Animations (0.5×)",
+                        command=lambda: self._set_animations("0.5")).pack(fill="x", padx=12, pady=4)
+        SecondaryButton(right_card, text="Disable Animations",
+                        command=lambda: self._set_animations("0")).pack(fill="x", padx=12, pady=4)
+        SecondaryButton(right_card, text="Reset Animations (1×)",
+                        command=lambda: self._set_animations("1")).pack(fill="x", padx=12, pady=4)
+        SecondaryButton(right_card, text="Clear All App Caches",
+                        command=self._clear_all_caches).pack(fill="x", padx=12, pady=4)
+        DangerButton(right_card, text="Kill Background Apps",
+                     command=self._kill_background_apps).pack(fill="x", padx=12, pady=(4, 12))
 
     def _build_install_tab(self):
-        tab = self.tabs.tab("Install")
-        tab.grid_columnconfigure(0, weight=1)
+        outer = self._tab_frames["Install"]
+        scroll = ctk.CTkScrollableFrame(outer, fg_color="transparent",
+            scrollbar_button_color=SURFACE_3, scrollbar_button_hover_color=SECONDARY_HOVER)
+        scroll.pack(fill="both", expand=True)
+        scroll.grid_columnconfigure(0, weight=1)
 
-        # APK install
-        apk_frame = ctk.CTkFrame(tab)
-        apk_frame.grid(row=0, column=0, padx=10, pady=10, sticky="ew")
+        # APK install card
+        apk_frame = Panel(scroll)
+        apk_frame.grid(row=0, column=0, padx=8, pady=8, sticky="ew")
         apk_frame.grid_columnconfigure(0, weight=1)
 
-        ctk.CTkLabel(apk_frame, text="Install APK", font=ctk.CTkFont(size=13, weight="bold")).grid(
-            row=0, column=0, columnspan=3, padx=10, pady=(8, 4), sticky="w")
+        ctk.CTkLabel(apk_frame, text="Install APK",
+                     font=ctk.CTkFont(family=_FONT, size=13, weight="bold"),
+                     text_color=TEXT).grid(
+            row=0, column=0, columnspan=3, padx=14, pady=(12, 4), sticky="w")
 
         self.apk_path_var = StringVar(value="No file selected")
-        ctk.CTkLabel(apk_frame, textvariable=self.apk_path_var, text_color="gray",
-                     font=ctk.CTkFont(size=11)).grid(row=1, column=0, columnspan=3, padx=10, pady=2, sticky="w")
+        ctk.CTkLabel(apk_frame, textvariable=self.apk_path_var,
+                     text_color=TEXT_DISABLED,
+                     font=ctk.CTkFont(family=_FONT, size=11)).grid(
+            row=1, column=0, columnspan=3, padx=14, pady=2, sticky="w")
 
-        ctk.CTkButton(apk_frame, text="Browse APK", command=self._browse_apk, width=120).grid(
-            row=2, column=0, padx=10, pady=4, sticky="w")
-        ctk.CTkButton(apk_frame, text="Install", fg_color="green", command=self._install_apk, width=120).grid(
-            row=2, column=1, padx=4, pady=4)
-        ctk.CTkButton(apk_frame, text="Bulk Install (Folder)", command=self._browse_bulk_folder, width=150).grid(
-            row=2, column=2, padx=10, pady=4, sticky="e")
+        SecondaryButton(apk_frame, text="Browse APK", command=self._browse_apk, width=120).grid(
+            row=2, column=0, padx=12, pady=(4, 12), sticky="w")
+        SuccessButton(apk_frame, text="Install", command=self._install_apk, width=120).grid(
+            row=2, column=1, padx=4, pady=(4, 12))
+        SecondaryButton(apk_frame, text="Bulk Install (Folder)", command=self._browse_bulk_folder, width=160).grid(
+            row=2, column=2, padx=12, pady=(4, 12), sticky="e")
 
-        # Shizuku
-        shiz_frame = ctk.CTkFrame(tab)
-        shiz_frame.grid(row=1, column=0, padx=10, pady=10, sticky="ew")
+        # Shizuku card
+        shiz_frame = Panel(scroll)
+        shiz_frame.grid(row=1, column=0, padx=8, pady=(0, 8), sticky="ew")
 
-        ctk.CTkLabel(shiz_frame, text="Shizuku", font=ctk.CTkFont(size=13, weight="bold")).grid(
-            row=0, column=0, columnspan=3, padx=10, pady=(8, 4), sticky="w")
+        ctk.CTkLabel(shiz_frame, text="Shizuku",
+                     font=ctk.CTkFont(family=_FONT, size=13, weight="bold"),
+                     text_color=TEXT).grid(
+            row=0, column=0, columnspan=3, padx=14, pady=(12, 4), sticky="w")
 
-        self._shizuku_status_label = ctk.CTkLabel(shiz_frame, text="", text_color="gray",
-                                                   font=ctk.CTkFont(size=11))
-        self._shizuku_status_label.grid(row=1, column=0, columnspan=3, padx=10, pady=2, sticky="w")
+        self._shizuku_status_label = ctk.CTkLabel(shiz_frame, text="",
+                                                   text_color=TEXT_DISABLED,
+                                                   font=ctk.CTkFont(family=_FONT, size=11))
+        self._shizuku_status_label.grid(row=1, column=0, columnspan=3, padx=14, pady=2, sticky="w")
 
         apk_present = SHIZUKU_APK.exists()
-        self._shizuku_dl_btn = ctk.CTkButton(shiz_frame, text="Download Shizuku", width=160,
-                                              command=self._download_shizuku,
-                                              state="disabled" if apk_present else "normal")
-        self._shizuku_dl_btn.grid(row=2, column=0, padx=10, pady=6)
-        self._shizuku_install_btn = ctk.CTkButton(shiz_frame, text="Install Shizuku", width=160,
+        self._shizuku_dl_btn = SecondaryButton(shiz_frame, text="Download Shizuku", width=160,
+                                               command=self._download_shizuku,
+                                               state="disabled" if apk_present else "normal")
+        self._shizuku_dl_btn.grid(row=2, column=0, padx=12, pady=(4, 12))
+        self._shizuku_install_btn = SuccessButton(shiz_frame, text="Install Shizuku", width=160,
                                                    command=self._install_shizuku,
                                                    state="normal" if apk_present else "disabled")
-        self._shizuku_install_btn.grid(row=2, column=1, padx=6, pady=6)
-        ctk.CTkButton(shiz_frame, text="Launch Shizuku", command=self._launch_shizuku, width=160).grid(
-            row=2, column=2, padx=10, pady=6)
+        self._shizuku_install_btn.grid(row=2, column=1, padx=4, pady=(4, 12))
+        SecondaryButton(shiz_frame, text="Launch Shizuku", command=self._launch_shizuku, width=160).grid(
+            row=2, column=2, padx=12, pady=(4, 12))
 
         self._refresh_shizuku_status()
 
-        # Quick-install popular apps
-        qi_frame = ctk.CTkFrame(tab)
-        qi_frame.grid(row=2, column=0, padx=10, pady=(0, 10), sticky="ew")
+        # Quick-install popular apps card
+        qi_frame = Panel(scroll)
+        qi_frame.grid(row=2, column=0, padx=8, pady=(0, 8), sticky="ew")
         ctk.CTkLabel(qi_frame, text="Quick Install Popular Apps",
-                     font=ctk.CTkFont(size=13, weight="bold")).grid(
-                     row=0, column=0, columnspan=3, padx=10, pady=(8, 4), sticky="w")
+                     font=ctk.CTkFont(family=_FONT, size=13, weight="bold"),
+                     text_color=TEXT).pack(anchor="w", padx=14, pady=(12, 8))
 
         self._qi_apps = {
             "AdGuard TV":       {"file": DATA_DIR / "adguard_tv.apk",
                                  "repo": "AdguardTeam/AdguardForAndroidTV",
-                                 "asset_suffix": ".apk"},
+                                 "asset_suffix": ".apk",
+                                 "description": "Ad blocker and content filter for Android TV"},
             "Aurora Store":     {"file": DATA_DIR / "aurora_store.apk",
                                  "repo": "AuroraOSS/AuroraStore",
                                  "asset_suffix": ".apk",
-                                 "gitlab": True},
+                                 "gitlab": True,
+                                 "description": "An unofficial FOSS client to Google Play."},
+            "Flicky":           {"file": DATA_DIR / "flicky.apk",
+                                 "repo": "mlm-games/flicky",
+                                 "asset_suffix": ".apk",
+                                 "description": "Yet Another FDroid Client (wide screen / TV friendly)"},
             "SmartTube Stable": {"file": DATA_DIR / "smarttube_stable.apk",
                                  "repo": "yuliskov/SmartTube",
-                                 "asset_contains": "smarttube_stable"},
-            "SmartTube Beta":   {"file": DATA_DIR / "smarttube_beta.apk",
-                                 "repo": "yuliskov/SmartTube",
-                                 "asset_contains": "smarttube_beta"},
+                                 "asset_contains": "smarttube_stable",
+                                 "description": "Browse media content with your own rules on Android TV"},
+            "TizenTube":        {"file": DATA_DIR / "tizentube.apk",
+                                 "repo": "reisxd/TizenTubeCobalt",
+                                 "asset_suffix": ".apk",
+                                 "description": "Experience TizenTube on other devices that are not Tizen."},
         }
 
+        qi_grid = ctk.CTkFrame(qi_frame, fg_color="transparent")
+        qi_grid.pack(fill="x", padx=8, pady=(0, 10))
+        qi_grid.grid_columnconfigure(0, weight=1)
+        qi_grid.grid_columnconfigure(1, weight=1)
+
         for i, (name, meta) in enumerate(self._qi_apps.items()):
-            ctk.CTkLabel(qi_frame, text=name, width=140,
-                         font=ctk.CTkFont(size=11)).grid(row=i+1, column=0, padx=(10, 4), pady=4, sticky="w")
+            g_col = i % 2
+            g_row = i // 2
+            repo_url = (f"https://gitlab.com/{meta['repo']}" if meta.get("gitlab")
+                        else f"https://github.com/{meta['repo']}")
+
+            cell = ctk.CTkFrame(qi_grid, fg_color=SURFACE_2, corner_radius=RADIUS_MD,
+                                border_width=1, border_color=BORDER)
+            cell.grid(row=g_row, column=g_col, padx=4, pady=4, sticky="ew")
+
+            name_lbl = ctk.CTkLabel(cell, text=name,
+                                    font=ctk.CTkFont(family=_FONT, size=12, weight="bold", underline=True),
+                                    text_color=PRIMARY, anchor="w")
+            name_lbl.pack(fill="x", padx=10, pady=(8, 2))
+            name_lbl.bind("<Button-1>", lambda e, u=repo_url: webbrowser.open(u))
+            name_lbl.bind("<Enter>", lambda e: e.widget.configure(cursor="hand2"))
+            name_lbl.bind("<Leave>", lambda e: e.widget.configure(cursor=""))
+
+            if meta.get("description"):
+                ctk.CTkLabel(cell, text=meta["description"], text_color=TEXT_DISABLED,
+                             font=ctk.CTkFont(family=_FONT, size=9),
+                             wraplength=220, anchor="w", justify="left").pack(fill="x", padx=10, pady=(0, 6))
+
+            btn_row = ctk.CTkFrame(cell, fg_color="transparent")
+            btn_row.pack(fill="x", padx=8, pady=(0, 8))
+
             present = meta["file"].exists()
-            dl_btn = ctk.CTkButton(qi_frame, text="Download", width=100,
-                                   state="disabled" if present else "normal",
-                                   command=lambda n=name: self._qi_download(n))
-            dl_btn.grid(row=i+1, column=1, padx=4, pady=4)
-            inst_btn = ctk.CTkButton(qi_frame, text="Install", width=80,
+            dl_btn = SecondaryButton(btn_row, text="Download", width=100, height=32,
+                                     state="disabled" if present else "normal",
+                                     command=lambda n=name: self._qi_download(n))
+            dl_btn.pack(side="left", padx=(0, 4))
+            inst_btn = SuccessButton(btn_row, text="Install", width=90, height=32,
                                      state="normal" if present else "disabled",
                                      command=lambda n=name: self._qi_install(n))
-            inst_btn.grid(row=i+1, column=2, padx=4, pady=4)
+            inst_btn.pack(side="left")
             meta["dl_btn"] = dl_btn
             meta["inst_btn"] = inst_btn
 
     def _build_settings_tab(self):
-        import tkinter as tk
-        tab = self.tabs.tab("Settings")
+        tab = _scrollable(self._tab_frames["Settings"])
         tab.grid_columnconfigure((0, 1), weight=1)
 
         def section(text, row, col=0, span=1):
-            ctk.CTkLabel(tab, text=text, font=ctk.CTkFont(size=12, weight="bold"),
-                         text_color="gray").grid(row=row, column=col, columnspan=span,
-                         padx=10, pady=(12, 2), sticky="w")
+            ctk.CTkLabel(tab, text=text, font=ctk.CTkFont(family=_FONT, size=12, weight="bold"),
+                         text_color=TEXT_MUTED).grid(
+                row=row, column=col, columnspan=span,
+                padx=12, pady=(14, 4), sticky="w")
 
         def btn(text, cmd, row, col, w=200):
-            ctk.CTkButton(tab, text=text, width=w, command=cmd).grid(
-                row=row, column=col, padx=8, pady=3, sticky="w")
+            SecondaryButton(tab, text=text, width=w, height=36, command=cmd).grid(
+                row=row, column=col, padx=10, pady=3, sticky="w")
 
-        # ── Display ────────────────────────────────────────────────────────────
-        section("Display", 0)
+        # ── Display section ─────────────────────────────────────────────────────
+        section("Display", 0, col=0, span=1)
+
+        disp = ctk.CTkFrame(tab, fg_color="transparent")
+        disp.grid(row=1, column=0, columnspan=2, sticky="ew", padx=8, pady=(0, 4))
+        disp.grid_columnconfigure(0, minsize=148)
+        disp.grid_columnconfigure(1, weight=1, minsize=260)
+        disp.grid_columnconfigure(2, minsize=96)
+
+        def _lbl(parent, text, row):
+            ctk.CTkLabel(parent, text=text, anchor="e", text_color=TEXT,
+                         font=ctk.CTkFont(family=_FONT, size=11)).grid(
+                row=row, column=0, sticky="e", padx=(0, 10), pady=7)
+
         rotation_opts = {"Portrait (0°)": "0", "Landscape (90°)": "1",
                          "Reverse Portrait (180°)": "2", "Reverse Landscape (270°)": "3"}
         self._rotation_var = ctk.StringVar(value="Portrait (0°)")
-        ctk.CTkLabel(tab, text="Rotate Screen:", font=ctk.CTkFont(size=11)).grid(
-            row=1, column=0, padx=(10, 0), pady=3, sticky="w")
-        rot_row = ctk.CTkFrame(tab, fg_color="transparent")
-        rot_row.grid(row=1, column=0, padx=8, pady=3, sticky="ew")
-        ctk.CTkOptionMenu(rot_row, values=list(rotation_opts.keys()),
-                          variable=self._rotation_var, width=200).pack(side="left", padx=(110, 4))
-        ctk.CTkButton(rot_row, text="Apply", width=60,
-                      command=lambda: self._set_rotation(rotation_opts[self._rotation_var.get()])).pack(side="left")
+        _lbl(disp, "Rotate Screen:", 0)
+        ctk.CTkOptionMenu(disp, values=list(rotation_opts.keys()),
+                          variable=self._rotation_var, width=280,
+                          fg_color=SURFACE_2, button_color=PRIMARY,
+                          button_hover_color=PRIMARY_HOVER,
+                          text_color=TEXT, corner_radius=RADIUS_SM).grid(
+            row=0, column=1, sticky="w", padx=(0, 8), pady=7)
+        SecondaryButton(disp, text="Apply", width=92, height=34,
+                        command=lambda: self._set_rotation(
+                            rotation_opts[self._rotation_var.get()])).grid(
+            row=0, column=2, sticky="w", pady=7)
 
         timeout_opts = {"30 seconds": "30000", "1 minute": "60000", "2 minutes": "120000",
                         "5 minutes": "300000", "10 minutes": "600000", "Never": "2147483647"}
         self._timeout_var = ctk.StringVar(value="5 minutes")
-        ctk.CTkLabel(tab, text="Screen Timeout:", font=ctk.CTkFont(size=11)).grid(
-            row=2, column=0, padx=(10, 0), pady=3, sticky="w")
-        to_row = ctk.CTkFrame(tab, fg_color="transparent")
-        to_row.grid(row=2, column=0, padx=8, pady=3, sticky="ew")
-        ctk.CTkOptionMenu(to_row, values=list(timeout_opts.keys()),
-                          variable=self._timeout_var, width=200).pack(side="left", padx=(110, 4))
-        ctk.CTkButton(to_row, text="Apply", width=60,
-                      command=lambda: self._set_screen_timeout(timeout_opts[self._timeout_var.get()])).pack(side="left")
+        _lbl(disp, "Screen Timeout:", 1)
+        ctk.CTkOptionMenu(disp, values=list(timeout_opts.keys()),
+                          variable=self._timeout_var, width=280,
+                          fg_color=SURFACE_2, button_color=PRIMARY,
+                          button_hover_color=PRIMARY_HOVER,
+                          text_color=TEXT, corner_radius=RADIUS_SM).grid(
+            row=1, column=1, sticky="w", padx=(0, 8), pady=7)
+        SecondaryButton(disp, text="Apply", width=92, height=34,
+                        command=lambda: self._set_screen_timeout(
+                            timeout_opts[self._timeout_var.get()])).grid(
+            row=1, column=2, sticky="w", pady=7)
 
-        density_row = ctk.CTkFrame(tab, fg_color="transparent")
-        density_row.grid(row=3, column=0, padx=8, pady=3, sticky="ew")
-        ctk.CTkLabel(density_row, text="Screen Density:", font=ctk.CTkFont(size=11)).pack(side="left", padx=(0, 6))
-        self._density_entry = ctk.CTkEntry(density_row, width=70, placeholder_text="320")
-        self._density_entry.pack(side="left", padx=(0, 4))
-        ctk.CTkButton(density_row, text="Apply", width=60,
-                      command=self._set_density).pack(side="left", padx=(0, 4))
-        ctk.CTkButton(density_row, text="Reset", width=60,
-                      command=self._reset_density).pack(side="left")
+        _lbl(disp, "Screen Density:", 2)
+        density_inner = ctk.CTkFrame(disp, fg_color="transparent")
+        density_inner.grid(row=2, column=1, sticky="w", padx=(0, 8), pady=7)
+        self._density_entry = _RoundEntry(density_inner, width=120, placeholder_text="320", height=34)
+        self._density_entry.pack(side="left", padx=(0, 8))
+        SecondaryButton(density_inner, text="Apply", width=88, height=34,
+                        command=self._set_density).pack(side="left", padx=(0, 6))
+        SecondaryButton(density_inner, text="Reset", width=88, height=34,
+                        command=self._reset_density).pack(side="left")
 
-        # ── Right column — toggles ─────────────────────────────────────────────
-        section("Developer Options", 0, col=1)
-        btn("Show Developer Options", self._dev_options_show, 1, 1)
-        btn("Hide Developer Options", self._dev_options_hide, 2, 1)
+        # ── Other sections (paired columns, same rows) ──────────────────────────
+        section("Location",          2, col=0)
+        section("Developer Options", 2, col=1)
+        btn("Enable GPS",              self._gps_on,           3, 0)
+        btn("Show Developer Options",  self._dev_options_show, 3, 1)
+        btn("Disable GPS",             self._gps_off,          4, 0)
+        btn("Hide Developer Options",  self._dev_options_hide, 4, 1)
 
-        section("Location", 4, col=0)
-        btn("Enable GPS", self._gps_on, 5, 0)
-        btn("Disable GPS", self._gps_off, 6, 0)
+        section("Ambient Display", 5, col=0)
+        section("Play Protect",    5, col=1)
+        btn("Enable Ambient Display",  self._ambient_on,        6, 0)
+        btn("Enable Play Protect",     self._play_protect_on,   6, 1)
+        btn("Disable Ambient Display", self._ambient_off,       7, 0)
+        btn("Disable Play Protect",    self._play_protect_off,  7, 1)
 
-        section("Play Protect", 4, col=1)
-        btn("Enable Play Protect", self._play_protect_on, 5, 1)
-        btn("Disable Play Protect", self._play_protect_off, 6, 1)
-
-        section("Ambient Display", 7, col=0)
-        btn("Enable Ambient Display", self._ambient_on, 8, 0)
-        btn("Disable Ambient Display", self._ambient_off, 9, 0)
-
-        section("Date & Time", 7, col=1)
-        btn("Repair NTP Server", self._repair_ntp, 8, 1)
+        section("Date & Time", 8, col=1)
+        btn("Repair NTP Server", self._repair_ntp, 9, 1)
 
     def _set_rotation(self, val):
         if not self._require_connection():
@@ -778,36 +1207,35 @@ class App(ctk.CTk):
         threading.Thread(target=run, daemon=True).start()
 
     def _build_tools_tab(self):
-        tab = self.tabs.tab("Tools")
+        tab = _scrollable(self._tab_frames["Tools"])
         tab.grid_columnconfigure((0, 1, 2), weight=1)
 
-        # ── Power ──────────────────────────────────────────────────────────────
-        ctk.CTkLabel(tab, text="Power", font=ctk.CTkFont(size=12, weight="bold"),
-                     text_color="gray").grid(row=0, column=0, padx=8, pady=(10, 2), sticky="w")
-        ctk.CTkButton(tab, text="Wake Device", width=190,
-                      command=lambda: self._keyevent(224)).grid(row=1, column=0, padx=8, pady=3, sticky="w")
-        ctk.CTkButton(tab, text="Sleep / Stand-by", width=190,
-                      command=lambda: self._keyevent(223)).grid(row=2, column=0, padx=8, pady=3, sticky="w")
-        ctk.CTkButton(tab, text="Soft Reboot", width=190,
-                      command=self._reboot_soft).grid(row=3, column=0, padx=8, pady=3, sticky="w")
-        ctk.CTkButton(tab, text="Reboot to Recovery", width=190,
-                      command=self._reboot_recovery).grid(row=4, column=0, padx=8, pady=3, sticky="w")
+        def section(text, row, col):
+            ctk.CTkLabel(tab, text=text, font=ctk.CTkFont(family=_FONT, size=12, weight="bold"),
+                         text_color=TEXT_MUTED).grid(
+                row=row, column=col, padx=10, pady=(12, 4), sticky="w")
 
-        # ── Navigation ─────────────────────────────────────────────────────────
-        ctk.CTkLabel(tab, text="Navigation", font=ctk.CTkFont(size=12, weight="bold"),
-                     text_color="gray").grid(row=0, column=1, padx=8, pady=(10, 2), sticky="w")
-        ctk.CTkButton(tab, text="Notification Curtain", width=190,
-                      command=self._notification_curtain).grid(row=1, column=1, padx=8, pady=3, sticky="w")
-        ctk.CTkButton(tab, text="Open Google Search (Weather)", width=190,
-                      command=self._google_search_weather).grid(row=2, column=1, padx=8, pady=3, sticky="w")
-        ctk.CTkButton(tab, text="Open System Updates", width=190,
-                      command=self._system_updates).grid(row=3, column=1, padx=8, pady=3, sticky="w")
-        ctk.CTkButton(tab, text="Disconnect All ADB", width=190,
-                      command=self._adb_disconnect_all).grid(row=4, column=1, padx=8, pady=3, sticky="w")
+        section("Power", 0, 0)
+        SecondaryButton(tab, text="Wake Device", width=190, height=36,
+                        command=lambda: self._keyevent(224)).grid(row=1, column=0, padx=8, pady=3, sticky="w")
+        SecondaryButton(tab, text="Sleep / Stand-by", width=190, height=36,
+                        command=lambda: self._keyevent(223)).grid(row=2, column=0, padx=8, pady=3, sticky="w")
+        SecondaryButton(tab, text="Soft Reboot", width=190, height=36,
+                        command=self._reboot_soft).grid(row=3, column=0, padx=8, pady=3, sticky="w")
+        SecondaryButton(tab, text="Reboot to Recovery", width=190, height=36,
+                        command=self._reboot_recovery).grid(row=4, column=0, padx=8, pady=3, sticky="w")
 
-        # ── Settings Shortcuts ─────────────────────────────────────────────────
-        ctk.CTkLabel(tab, text="Settings Shortcuts", font=ctk.CTkFont(size=12, weight="bold"),
-                     text_color="gray").grid(row=0, column=2, padx=8, pady=(10, 2), sticky="w")
+        section("Navigation", 0, 1)
+        SecondaryButton(tab, text="Notification Curtain", width=190, height=36,
+                        command=self._notification_curtain).grid(row=1, column=1, padx=8, pady=3, sticky="w")
+        SecondaryButton(tab, text="Open Google Search (Weather)", width=190, height=36,
+                        command=self._google_search_weather).grid(row=2, column=1, padx=8, pady=3, sticky="w")
+        SecondaryButton(tab, text="Open System Updates", width=190, height=36,
+                        command=self._system_updates).grid(row=3, column=1, padx=8, pady=3, sticky="w")
+        SecondaryButton(tab, text="Disconnect All ADB", width=190, height=36,
+                        command=self._adb_disconnect_all).grid(row=4, column=1, padx=8, pady=3, sticky="w")
+
+        section("Settings Shortcuts", 0, 2)
         for i, (label, action) in enumerate([
             ("Display Settings",    "android.settings.DISPLAY_SETTINGS"),
             ("Wi-Fi Settings",      "android.settings.WIFI_SETTINGS"),
@@ -816,109 +1244,118 @@ class App(ctk.CTk):
             ("Developer Options",   "com.android.settings.APPLICATION_DEVELOPMENT_SETTINGS"),
         ]):
             a = action
-            ctk.CTkButton(tab, text=label, width=190,
-                          command=lambda act=a: self._open_settings(act)).grid(
-                          row=i + 1, column=2, padx=8, pady=3, sticky="w")
+            SecondaryButton(tab, text=label, width=190, height=36,
+                            command=lambda act=a: self._open_settings(act)).grid(
+                            row=i + 1, column=2, padx=8, pady=3, sticky="w")
 
-        # ── Launch App ─────────────────────────────────────────────────────────
-        ctk.CTkLabel(tab, text="Launch App (package name)", font=ctk.CTkFont(size=12, weight="bold"),
-                     text_color="gray").grid(row=5, column=0, columnspan=2, padx=8, pady=(12, 2), sticky="w")
+        ctk.CTkLabel(tab, text="Launch App (package name)",
+                     font=ctk.CTkFont(family=_FONT, size=12, weight="bold"),
+                     text_color=TEXT_MUTED).grid(
+            row=5, column=0, columnspan=2, padx=10, pady=(14, 4), sticky="w")
         launch_row = ctk.CTkFrame(tab, fg_color="transparent")
-        launch_row.grid(row=6, column=0, columnspan=2, padx=8, pady=2, sticky="ew")
+        launch_row.grid(row=6, column=0, columnspan=2, padx=10, pady=2, sticky="ew")
         launch_row.grid_columnconfigure(0, weight=1)
-        self._launch_pkg_entry = ctk.CTkEntry(launch_row, placeholder_text="com.example.app")
+        self._launch_pkg_entry = _RoundEntry(launch_row, placeholder_text="com.example.app")
         self._launch_pkg_entry.grid(row=0, column=0, sticky="ew", padx=(0, 6))
         self._launch_pkg_entry.bind("<Return>", lambda e: self._launch_app())
-        ctk.CTkButton(launch_row, text="Launch", width=80, command=self._launch_app).grid(row=0, column=1)
+        SecondaryButton(launch_row, text="Launch", width=90, height=36,
+                        command=self._launch_app).grid(row=0, column=1)
 
-        # ── Send Text ──────────────────────────────────────────────────────────
-        ctk.CTkLabel(tab, text="Send Text to Device", font=ctk.CTkFont(size=12, weight="bold"),
-                     text_color="gray").grid(row=7, column=0, columnspan=2, padx=8, pady=(10, 2), sticky="w")
+        ctk.CTkLabel(tab, text="Send Text to Device",
+                     font=ctk.CTkFont(family=_FONT, size=12, weight="bold"),
+                     text_color=TEXT_MUTED).grid(
+            row=7, column=0, columnspan=2, padx=10, pady=(12, 4), sticky="w")
         send_row = ctk.CTkFrame(tab, fg_color="transparent")
-        send_row.grid(row=8, column=0, columnspan=2, padx=8, pady=2, sticky="ew")
+        send_row.grid(row=8, column=0, columnspan=2, padx=10, pady=2, sticky="ew")
         send_row.grid_columnconfigure(0, weight=1)
-        self._send_text_entry = ctk.CTkEntry(send_row, placeholder_text="Type text to send...")
+        self._send_text_entry = _RoundEntry(send_row, placeholder_text="Type text to send...")
         self._send_text_entry.grid(row=0, column=0, sticky="ew", padx=(0, 6))
         self._send_text_entry.bind("<Return>", lambda e: self._send_text())
-        ctk.CTkButton(send_row, text="Send", width=70, command=self._send_text).grid(row=0, column=1)
+        SecondaryButton(send_row, text="Send", width=80, height=36,
+                        command=self._send_text).grid(row=0, column=1)
 
-        # ── ADB Console ────────────────────────────────────────────────────────
-        ctk.CTkLabel(tab, text="ADB Console", font=ctk.CTkFont(size=12, weight="bold"),
-                     text_color="gray").grid(row=9, column=0, columnspan=3, padx=8, pady=(10, 2), sticky="w")
+        ctk.CTkLabel(tab, text="ADB Console",
+                     font=ctk.CTkFont(family=_FONT, size=12, weight="bold"),
+                     text_color=TEXT_MUTED).grid(
+            row=9, column=0, columnspan=3, padx=10, pady=(12, 4), sticky="w")
         adb_row = ctk.CTkFrame(tab, fg_color="transparent")
-        adb_row.grid(row=10, column=0, columnspan=3, padx=8, pady=(2, 10), sticky="ew")
+        adb_row.grid(row=10, column=0, columnspan=3, padx=10, pady=(2, 10), sticky="ew")
         adb_row.grid_columnconfigure(0, weight=1)
-        self._adb_cmd_entry = ctk.CTkEntry(adb_row, placeholder_text="shell input keyevent 3   (omit 'adb')")
+        self._adb_cmd_entry = _RoundEntry(adb_row, placeholder_text="shell input keyevent 3   (omit 'adb')")
         self._adb_cmd_entry.grid(row=0, column=0, sticky="ew", padx=(0, 6))
         self._adb_cmd_entry.bind("<Return>", lambda e: self._run_adb_console())
-        ctk.CTkButton(adb_row, text="Run", width=60, command=self._run_adb_console).grid(row=0, column=1)
+        SecondaryButton(adb_row, text="Run", width=70, height=36,
+                        command=self._run_adb_console).grid(row=0, column=1)
 
     def _build_media_tab(self):
-        tab = self.tabs.tab("Media")
+        tab = _scrollable(self._tab_frames["Media"])
         tab.grid_columnconfigure(0, weight=1)
 
-        # ── ScrCpy ─────────────────────────────────────────────────────────────
-        scrcpy_frame = ctk.CTkFrame(tab)
-        scrcpy_frame.grid(row=0, column=0, padx=10, pady=10, sticky="ew")
+        scrcpy_frame = Panel(tab)
+        scrcpy_frame.grid(row=0, column=0, padx=8, pady=8, sticky="ew")
         ctk.CTkLabel(scrcpy_frame, text="ScrCpy — View & Control",
-                     font=ctk.CTkFont(size=13, weight="bold")).pack(padx=10, pady=(8, 2), anchor="w")
+                     font=ctk.CTkFont(family=_FONT, size=13, weight="bold"),
+                     text_color=TEXT).pack(padx=14, pady=(12, 2), anchor="w")
         ctk.CTkLabel(scrcpy_frame, text="Place scrcpy.exe in bin/ or install to PATH.",
-                     text_color="gray", font=ctk.CTkFont(size=11)).pack(padx=10, pady=(0, 4), anchor="w")
+                     text_color=TEXT_DISABLED, font=ctk.CTkFont(family=_FONT, size=11)).pack(padx=14, pady=(0, 6), anchor="w")
         btn_row = ctk.CTkFrame(scrcpy_frame, fg_color="transparent")
-        btn_row.pack(padx=10, pady=(0, 8), anchor="w")
-        ctk.CTkButton(btn_row, text="Launch ScrCpy", width=150,
+        btn_row.pack(padx=12, pady=(0, 12), anchor="w")
+        PrimaryButton(btn_row, text="Launch ScrCpy", width=150,
                       command=self._launch_scrcpy).pack(side="left", padx=(0, 8))
-        ctk.CTkButton(btn_row, text="Download ScrCpy", width=150, fg_color="gray40",
-                      command=lambda: webbrowser.open("https://github.com/Genymobile/scrcpy/releases/latest")).pack(side="left")
+        SecondaryButton(btn_row, text="Download ScrCpy", width=150,
+                        command=lambda: webbrowser.open("https://github.com/Genymobile/scrcpy/releases/latest")).pack(side="left")
 
-        # ── Screen Recording ───────────────────────────────────────────────────
-        rec_frame = ctk.CTkFrame(tab)
-        rec_frame.grid(row=1, column=0, padx=10, pady=(0, 10), sticky="ew")
+        rec_frame = Panel(tab)
+        rec_frame.grid(row=1, column=0, padx=8, pady=(0, 8), sticky="ew")
         ctk.CTkLabel(rec_frame, text="Screen Recording",
-                     font=ctk.CTkFont(size=13, weight="bold")).pack(padx=10, pady=(8, 2), anchor="w")
-        self._rec_status = ctk.CTkLabel(rec_frame, text="Not recording.", text_color="gray",
-                                         font=ctk.CTkFont(size=11))
-        self._rec_status.pack(padx=10, pady=(0, 4), anchor="w")
+                     font=ctk.CTkFont(family=_FONT, size=13, weight="bold"),
+                     text_color=TEXT).pack(padx=14, pady=(12, 2), anchor="w")
+        self._rec_status = ctk.CTkLabel(rec_frame, text="Not recording.",
+                                         text_color=TEXT_DISABLED, font=ctk.CTkFont(family=_FONT, size=11))
+        self._rec_status.pack(padx=14, pady=(0, 6), anchor="w")
         rec_btn_row = ctk.CTkFrame(rec_frame, fg_color="transparent")
-        rec_btn_row.pack(padx=10, pady=(0, 8), anchor="w")
-        self._rec_start_btn = ctk.CTkButton(rec_btn_row, text="Start Recording", width=150,
-                                             fg_color="green", command=self._start_recording)
+        rec_btn_row.pack(padx=12, pady=(0, 12), anchor="w")
+        self._rec_start_btn = SuccessButton(rec_btn_row, text="Start Recording", width=150,
+                                             command=self._start_recording)
         self._rec_start_btn.pack(side="left", padx=(0, 8))
-        self._rec_stop_btn = ctk.CTkButton(rec_btn_row, text="Stop & Pull", width=150,
-                                            state="disabled", command=self._stop_recording)
+        self._rec_stop_btn = SecondaryButton(rec_btn_row, text="Stop & Pull", width=150,
+                                              state="disabled", command=self._stop_recording)
         self._rec_stop_btn.pack(side="left")
         self._recording = False
 
-        # ── File Transfer ──────────────────────────────────────────────────────
-        ft_frame = ctk.CTkFrame(tab)
-        ft_frame.grid(row=2, column=0, padx=10, pady=(0, 10), sticky="ew")
+        ft_frame = Panel(tab)
+        ft_frame.grid(row=2, column=0, padx=8, pady=(0, 8), sticky="ew")
         ft_frame.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(ft_frame, text="File Transfer",
-                     font=ctk.CTkFont(size=13, weight="bold")).grid(
-                     row=0, column=0, columnspan=3, padx=10, pady=(8, 4), sticky="w")
+                     font=ctk.CTkFont(family=_FONT, size=13, weight="bold"),
+                     text_color=TEXT).grid(
+                     row=0, column=0, columnspan=3, padx=14, pady=(12, 4), sticky="w")
 
-        ctk.CTkLabel(ft_frame, text="Send file to /sdcard/:", font=ctk.CTkFont(size=11)).grid(
-            row=1, column=0, padx=10, pady=3, sticky="w")
+        ctk.CTkLabel(ft_frame, text="Send file to /sdcard/:",
+                     font=ctk.CTkFont(family=_FONT, size=11), text_color=TEXT_MUTED).grid(
+            row=1, column=0, padx=14, pady=(0, 2), sticky="w")
         push_row = ctk.CTkFrame(ft_frame, fg_color="transparent")
-        push_row.grid(row=2, column=0, padx=10, pady=(0, 6), sticky="ew")
+        push_row.grid(row=2, column=0, padx=12, pady=(0, 8), sticky="ew")
         push_row.grid_columnconfigure(0, weight=1)
         self._push_path_var = ctk.StringVar(value="No file selected")
-        ctk.CTkLabel(push_row, textvariable=self._push_path_var, text_color="gray",
-                     font=ctk.CTkFont(size=11)).grid(row=0, column=0, sticky="w")
-        ctk.CTkButton(push_row, text="Browse", width=80,
-                      command=self._browse_push_file).grid(row=0, column=1, padx=(6, 4))
-        ctk.CTkButton(push_row, text="Send", width=70, fg_color="green",
+        ctk.CTkLabel(push_row, textvariable=self._push_path_var,
+                     text_color=TEXT_DISABLED, font=ctk.CTkFont(family=_FONT, size=11)).grid(
+            row=0, column=0, sticky="w")
+        SecondaryButton(push_row, text="Browse", width=80, height=36,
+                        command=self._browse_push_file).grid(row=0, column=1, padx=(6, 4))
+        SuccessButton(push_row, text="Send", width=80, height=36,
                       command=self._push_file).grid(row=0, column=2)
 
-        ctk.CTkLabel(ft_frame, text="Download file from device:", font=ctk.CTkFont(size=11)).grid(
-            row=3, column=0, padx=10, pady=(6, 3), sticky="w")
+        ctk.CTkLabel(ft_frame, text="Download file from device:",
+                     font=ctk.CTkFont(family=_FONT, size=11), text_color=TEXT_MUTED).grid(
+            row=3, column=0, padx=14, pady=(4, 2), sticky="w")
         pull_row = ctk.CTkFrame(ft_frame, fg_color="transparent")
-        pull_row.grid(row=4, column=0, padx=10, pady=(0, 8), sticky="ew")
+        pull_row.grid(row=4, column=0, padx=12, pady=(0, 12), sticky="ew")
         pull_row.grid_columnconfigure(0, weight=1)
-        self._pull_path_entry = ctk.CTkEntry(pull_row, placeholder_text="/sdcard/Download/file.mp4")
+        self._pull_path_entry = _RoundEntry(pull_row, placeholder_text="/sdcard/Download/file.mp4")
         self._pull_path_entry.grid(row=0, column=0, sticky="ew", padx=(0, 6))
-        ctk.CTkButton(pull_row, text="Download", width=90,
-                      command=self._pull_file).grid(row=0, column=1)
+        SecondaryButton(pull_row, text="Download", width=100, height=36,
+                        command=self._pull_file).grid(row=0, column=1)
 
     def _launch_scrcpy(self):
         if not self._require_connection():
@@ -941,7 +1378,7 @@ class App(ctk.CTk):
         self._recording = True
         self._rec_start_btn.configure(state="disabled")
         self._rec_stop_btn.configure(state="normal")
-        self._rec_status.configure(text="Recording...", text_color="red")
+        self._rec_status.configure(text="Recording...", text_color=DANGER)
         def run():
             adb("shell", "screenrecord", "--bit-rate", "4000000",
                 "/sdcard/_tv_tools_rec.mp4", serial=self.serial, timeout=600)
@@ -953,7 +1390,7 @@ class App(ctk.CTk):
         self._recording = False
         self._rec_start_btn.configure(state="normal")
         self._rec_stop_btn.configure(state="disabled")
-        self._rec_status.configure(text="Stopping...", text_color="orange")
+        self._rec_status.configure(text="Stopping...", text_color=WARNING)
         def run():
             adb("shell", "pkill", "-INT", "screenrecord", serial=self.serial)
             import time; time.sleep(1)
@@ -966,7 +1403,7 @@ class App(ctk.CTk):
                 adb("pull", "/sdcard/_tv_tools_rec.mp4", dest, serial=self.serial, timeout=120)
                 self._log(f"Saved to {dest}")
             adb("shell", "rm", "-f", "/sdcard/_tv_tools_rec.mp4", serial=self.serial)
-            self.after(0, lambda: self._rec_status.configure(text="Not recording.", text_color="gray"))
+            self.after(0, lambda: self._rec_status.configure(text="Not recording.", text_color=TEXT_DISABLED))
         threading.Thread(target=run, daemon=True).start()
 
     def _browse_push_file(self):
@@ -1006,69 +1443,74 @@ class App(ctk.CTk):
         threading.Thread(target=run, daemon=True).start()
 
     def _build_remote_tab(self):
-        tab = self.tabs.tab("Remote")
+        outer = _scrollable(self._tab_frames["Remote"])
+        outer.grid_columnconfigure(0, weight=1)
 
-        ctk.CTkLabel(tab, text="Remote Control",
-                     font=ctk.CTkFont(size=13, weight="bold")).pack(pady=(10, 6))
+        ctk.CTkLabel(outer, text="Remote Control",
+                     font=ctk.CTkFont(family=_FONT, size=15, weight="bold"),
+                     text_color=TEXT).grid(row=0, column=0, pady=(12, 8))
 
-        grid = ctk.CTkFrame(tab)
-        grid.pack(pady=4)
+        remote_panel = Panel(outer)
+        remote_panel.grid(row=1, column=0, pady=(0, 16), padx=16)
 
-        def kb(text, code, row, col, w=80, h=44, color=None):
-            kw = {"width": w, "height": h, "command": lambda c=code: self._keyevent(c)}
-            if color:
-                kw["fg_color"] = color
-            ctk.CTkButton(grid, text=text, **kw).grid(row=row, column=col, padx=3, pady=3)
+        for c in range(4):
+            remote_panel.grid_columnconfigure(c, weight=1)
 
-        # Volume top row
-        kb("Vol+",   24, 0, 1)
-        kb("Mute",  164, 0, 2)
+        def _sb(text, code, row, col, w=112, h=52):
+            SecondaryButton(remote_panel, text=text, width=w, height=h,
+                            command=lambda c=code: self._keyevent(c)).grid(
+                row=row, column=col, padx=6, pady=6)
 
-        # D-pad + Vol
-        kb("⏮",   88, 1, 0)
-        kb("▲",   19, 1, 1)
-        kb("⏭",   87, 1, 2)
-        kb("Vol-",  25, 1, 3)
+        # D-pad (columns 0-2, rows 1-3)
+        _sb("▲", 19, 1, 1)
+        _sb("◀", 21, 2, 0)
+        PrimaryButton(remote_panel, text="OK", width=112, height=52,
+                      command=lambda: self._keyevent(23)).grid(row=2, column=1, padx=6, pady=6)
+        _sb("▶", 22, 2, 2)
+        _sb("▼", 20, 3, 1)
 
-        kb("◀",   21, 2, 0)
-        kb("OK",   23, 2, 1, color="#1f6aa5")
-        kb("▶",   22, 2, 2)
+        # Volume group (column 3, rows 1-3)
+        _sb("Vol+", 24, 1, 3, w=104, h=48)
+        _sb("Mute", 164, 2, 3, w=104, h=48)
+        _sb("Vol-", 25, 3, 3, w=104, h=48)
 
-        ctk.CTkFrame(grid, width=80, height=44, fg_color="transparent").grid(row=3, column=0, padx=3, pady=3)
-        kb("▼",   20, 3, 1)
+        # Nav row (row 4)
+        _sb("Back",  4, 4, 0, w=112, h=48)
+        _sb("Home",  3, 4, 1, w=112, h=48)
+        _sb("Menu", 82, 4, 2, w=112, h=48)
 
-        # Nav row
-        kb("Back",   4, 4, 0)
-        kb("Home",   3, 4, 1)
-        kb("Menu",  82, 4, 2)
+        # Media row (row 5)
+        _sb("⏮", 88, 5, 0, w=112, h=48)
+        _sb("⏯", 85, 5, 1, w=112, h=48)
+        _sb("⏭", 87, 5, 2, w=112, h=48)
 
-        # Media row
-        kb("⏪",  88, 5, 0)
-        kb("⏯",  85, 5, 1)
-        kb("⏩",  87, 5, 2)
-
-        # Power row
-        kb("Power", 26, 6, 1, color="#5a0000")
+        # Power (row 6, separated)
+        DangerButton(remote_panel, text="Power", width=112, height=48,
+                     command=lambda: self._keyevent(26)).grid(
+            row=6, column=1, padx=6, pady=(18, 12))
 
     def _build_screenshot_tab(self):
-        tab = self.tabs.tab("Screenshot")
+        tab = self._tab_frames["Screenshot"]
         tab.grid_columnconfigure(0, weight=1)
+        tab.grid_rowconfigure(0, weight=0)
         tab.grid_rowconfigure(1, weight=1)
 
         btn_row = ctk.CTkFrame(tab, fg_color="transparent")
-        btn_row.grid(row=0, column=0, padx=10, pady=(10, 4), sticky="ew")
+        btn_row.grid(row=0, column=0, padx=10, pady=(10, 6), sticky="ew")
 
-        ctk.CTkButton(btn_row, text="Take Screenshot", width=150,
+        PrimaryButton(btn_row, text="Take Screenshot", width=160,
                       command=self._take_screenshot).pack(side="left", padx=(0, 8))
-        ctk.CTkButton(btn_row, text="Save As...", width=110,
-                      command=self._save_screenshot).pack(side="left", padx=(0, 8))
+        SecondaryButton(btn_row, text="Save As...", width=110,
+                        command=self._save_screenshot).pack(side="left", padx=(0, 8))
         self._screenshot_label = ctk.CTkLabel(btn_row, text="No screenshot yet.",
-                                              text_color="gray", font=ctk.CTkFont(size=11))
+                                              text_color=TEXT_DISABLED,
+                                              font=ctk.CTkFont(family=_FONT, size=11))
         self._screenshot_label.pack(side="left")
 
-        self._screenshot_canvas = ctk.CTkLabel(tab, text="", fg_color="#1a1a1a", corner_radius=6)
+        self._screenshot_canvas = ctk.CTkLabel(tab, text="",
+                                                fg_color=SURFACE_1, corner_radius=RADIUS_XL)
         self._screenshot_canvas.grid(row=1, column=0, padx=10, pady=(0, 10), sticky="nsew")
-        self._screenshot_image = None  # holds PhotoImage reference
+        self._screenshot_image = None
 
     # ── device list ────────────────────────────────────────────────────────────
     def _populate_device_list(self):
@@ -1078,38 +1520,83 @@ class App(ctk.CTk):
 
         if not self.history:
             ctk.CTkLabel(self.device_list, text="No devices.\nScan or add manually.",
-                         text_color="gray", font=ctk.CTkFont(size=10)).pack(pady=10)
+                         text_color=TEXT_DISABLED, font=ctk.CTkFont(family=_FONT, size=10)).pack(pady=10)
             return
 
         for ip in sorted(self.history.keys(),
                          key=lambda x: [int(p) if p.isdigit() else 0 for p in x.split(".")]):
-            meta  = self.history[ip]
-            label = meta.get("label", ip) if isinstance(meta, dict) else str(meta)
-            port  = meta.get("port", 5555) if isinstance(meta, dict) else 5555
-            seen  = _last_seen_str(meta.get("last_seen", "") if isinstance(meta, dict) else "")
+            meta     = self.history[ip]
+            label    = meta.get("label", ip) if isinstance(meta, dict) else str(meta)
+            port     = meta.get("port", 5555) if isinstance(meta, dict) else 5555
+            seen     = _last_seen_str(meta.get("last_seen", "") if isinstance(meta, dict) else "")
             verified = meta.get("verified", False) if isinstance(meta, dict) else False
             wireless = meta.get("wireless", False) if isinstance(meta, dict) else False
 
-            row = ctk.CTkFrame(self.device_list, fg_color="transparent")
-            row.pack(fill="x", padx=2, pady=2)
-            row.grid_columnconfigure(0, weight=1)
-
-            dot = "🔵" if verified else "⚪"
-            suffix = " 📶" if wireless else ""
             port_txt = f":{port}" if port != 5555 else ""
-            rb = ctk.CTkRadioButton(
-                row,
-                text=f"{dot} {ip}{port_txt}{suffix}\n    {label}\n    {seen}",
-                variable=self.selected_ip, value=ip,
-                font=ctk.CTkFont(size=10))
-            rb.grid(row=0, column=0, sticky="w")
-            self._device_radio_buttons.append(rb)
+            suffix   = " ↝" if wireless else ""
+            is_sel   = self.selected_ip.get() == ip
 
-            del_btn = ctk.CTkButton(row, text="×", width=22, height=22,
-                                    fg_color="transparent", hover_color="gray30",
-                                    font=ctk.CTkFont(size=13),
-                                    command=lambda i=ip: self._delete_device(i))
-            del_btn.grid(row=0, column=1, padx=(0, 2))
+            card = Panel(
+                self.device_list,
+                fg_color=SURFACE_2 if is_sel else SURFACE_1,
+                corner_radius=RADIUS_MD,
+                border_width=1,
+                border_color=PRIMARY if is_sel else BORDER,
+            )
+            card.pack(fill="x", padx=4, pady=3)
+            card.grid_columnconfigure(0, weight=1)
+            card.grid_columnconfigure(1, minsize=24)
+
+            # Row 0: device name + × button on same line
+            name_row = ctk.CTkFrame(card, fg_color="transparent")
+            name_row.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(4, 0), padx=(10, 0))
+            name_row.grid_columnconfigure(0, weight=1)
+
+            name_lbl = ctk.CTkLabel(name_row,
+                         text=label,
+                         text_color=TEXT,
+                         font=ctk.CTkFont(family=_FONT, size=13, weight="bold"),
+                         anchor="w",
+                         justify="left",
+                         wraplength=155)
+            name_lbl.grid(row=0, column=0, sticky="ew", padx=(0, 2))
+
+            del_btn = ctk.CTkButton(
+                name_row, text="×", width=18, height=18,
+                corner_radius=6,
+                fg_color="transparent",
+                hover_color=SURFACE_3,
+                text_color=TEXT_DISABLED,
+                font=ctk.CTkFont(family=_FONT, size=13),
+                command=lambda i=ip: self._delete_device(i),
+            )
+            del_btn.grid(row=0, column=1, padx=(0, 6), pady=(2, 0), sticky="ne")
+
+            # Row 1: IP (subtitle)
+            ip_lbl = ctk.CTkLabel(card,
+                         text=f"{ip}{port_txt}{suffix}",
+                         text_color=TEXT_MUTED,
+                         font=ctk.CTkFont(family=_FONT, size=11),
+                         height=16, anchor="w")
+            ip_lbl.grid(row=1, column=0, columnspan=2, sticky="ew", padx=(10, 0), pady=0)
+
+            # Row 2: last seen
+            seen_lbl = ctk.CTkLabel(card,
+                         text=seen,
+                         text_color=TEXT_DISABLED,
+                         font=ctk.CTkFont(family=_FONT, size=10),
+                         height=16, anchor="w")
+            seen_lbl.grid(row=2, column=0, columnspan=2, sticky="ew", padx=(10, 0), pady=(0, 4))
+
+            # Select on click anywhere on card except the delete button
+            def _select(event=None, i=ip):
+                self.selected_ip.set(i)
+                self._populate_device_list()
+            for w in (card, name_row, name_lbl, ip_lbl, seen_lbl):
+                w.configure(cursor="hand2")
+                w.bind("<Button-1>", _select)
+
+            self._device_radio_buttons.append(card)
 
     def _delete_device(self, ip):
         delete_history(ip)
@@ -1192,13 +1679,13 @@ class App(ctk.CTk):
         dialog.lift()
 
         ctk.CTkLabel(dialog, text="Android Debug Bridge (ADB) could not be found.",
-                     font=ctk.CTkFont(size=13, weight="bold")).pack(pady=(20, 2), padx=20, anchor="w")
+                     font=ctk.CTkFont(family=_FONT, size=13, weight="bold")).pack(pady=(20, 2), padx=20, anchor="w")
         ctk.CTkLabel(dialog, text="ADB is required to communicate with your Android TV device.",
                      text_color="gray").pack(padx=20, anchor="w")
 
         link = ctk.CTkLabel(dialog, text="  → Download Android SDK Platform Tools",
                             text_color="#4a9eff", cursor="hand2",
-                            font=ctk.CTkFont(size=12, underline=True))
+                            font=ctk.CTkFont(family=_FONT, size=12, underline=True))
         link.pack(padx=20, pady=(6, 14), anchor="w")
         link.bind("<Button-1>", lambda e: webbrowser.open(
             "https://developer.android.com/tools/releases/platform-tools"))
@@ -1307,8 +1794,7 @@ class App(ctk.CTk):
                 self._refresh_info_async()
             else:
                 self._log(f"Failed to connect to {serial}")
-                self.after(0, lambda: self.status_label.configure(
-                    text=f"Failed: {serial}", text_color="red"))
+                self.after(0, lambda: self.log_frame.configure(border_color=DANGER))
         threading.Thread(target=run, daemon=True).start()
 
     def _disconnect(self):
@@ -1317,10 +1803,19 @@ class App(ctk.CTk):
             if self.serial:
                 adb("disconnect", self.serial)
             self.serial = None
-            self.after(0, lambda: self.status_label.configure(
-                text="Not connected", text_color="gray"))
+            self.after(0, self._reset_connect_btn)
             self._log("Disconnected.")
         threading.Thread(target=run, daemon=True).start()
+
+    def _reset_connect_btn(self):
+        self.log_frame.configure(border_color=BORDER)
+        self._set_tabs_enabled(False)
+        self.connect_btn.configure(
+            text="Connect", fg_color=PRIMARY,
+            hover_color=PRIMARY_HOVER, text_color=APP_BG,
+            command=self._connect,
+        )
+        self.disconnect_btn.grid()
 
     def _open_pair_dialog(self):
         """Wireless debugging pairing dialog for Android 11+ (adb pair)."""
@@ -1332,11 +1827,11 @@ class App(ctk.CTk):
         dlg.lift()
 
         ctk.CTkLabel(dlg, text="Pair via Wireless Debugging",
-                     font=ctk.CTkFont(size=13, weight="bold")).pack(padx=20, pady=(16, 4), anchor="w")
+                     font=ctk.CTkFont(family=_FONT, size=13, weight="bold")).pack(padx=20, pady=(16, 4), anchor="w")
         ctk.CTkLabel(dlg, text=(
             "On the TV: Settings → Developer Options → Wireless Debugging\n"
             "Tap 'Pair device with pairing code' to get the pairing port + code."),
-            text_color="gray", font=ctk.CTkFont(size=11), justify="left").pack(padx=20, pady=(0, 10), anchor="w")
+            text_color="gray", font=ctk.CTkFont(family=_FONT, size=11), justify="left").pack(padx=20, pady=(0, 10), anchor="w")
 
         form = ctk.CTkFrame(dlg, fg_color="transparent")
         form.pack(fill="x", padx=20)
@@ -1348,13 +1843,13 @@ class App(ctk.CTk):
         hints = ["192.168.1.x", "e.g. 42389", "e.g. 123456", "shown on Wireless Debug screen"]
         for i, ((lbl, key), hint) in enumerate(zip(fields, hints)):
             ctk.CTkLabel(form, text=lbl + ":", width=110, anchor="e",
-                         font=ctk.CTkFont(size=11)).grid(row=i, column=0, padx=(0, 8), pady=4, sticky="e")
+                         font=ctk.CTkFont(family=_FONT, size=11)).grid(row=i, column=0, padx=(0, 8), pady=4, sticky="e")
             var = StringVar()
             self._pair_vars[key] = var
             ctk.CTkEntry(form, textvariable=var, placeholder_text=hint,
-                         height=28, font=ctk.CTkFont(size=11)).grid(row=i, column=1, sticky="ew", pady=4)
+                         height=28, font=ctk.CTkFont(family=_FONT, size=11)).grid(row=i, column=1, sticky="ew", pady=4)
 
-        status = ctk.CTkLabel(dlg, text="", font=ctk.CTkFont(size=11), text_color="gray")
+        status = ctk.CTkLabel(dlg, text="", font=ctk.CTkFont(family=_FONT, size=11), text_color="gray")
         status.pack(padx=20, pady=(8, 0), anchor="w")
 
         def do_pair():
@@ -1404,12 +1899,12 @@ class App(ctk.CTk):
 
     def _refresh_info_async(self):
         s = self.serial
-        manufacturer = adb_out("shell", "getprop", "ro.product.manufacturer", serial=s)
-        model        = adb_out("shell", "getprop", "ro.product.model", serial=s)
-        android_ver  = adb_out("shell", "getprop", "ro.build.version.release", serial=s)
-        build_id     = adb_out("shell", "getprop", "ro.build.display.id", serial=s)
-        serial_no    = adb_out("shell", "getprop", "ro.serialno", serial=s)
-        abi          = adb_out("shell", "getprop", "ro.product.cpu.abi", serial=s)
+        manufacturer = _clean_prop(adb_out("shell", "getprop", "ro.product.manufacturer", serial=s))
+        model        = _clean_prop(adb_out("shell", "getprop", "ro.product.model", serial=s))
+        android_ver  = _clean_prop(adb_out("shell", "getprop", "ro.build.version.release", serial=s))
+        build_id     = _clean_prop(adb_out("shell", "getprop", "ro.build.display.id", serial=s))
+        serial_no    = _clean_prop(adb_out("shell", "getprop", "ro.serialno", serial=s))
+        abi          = _clean_prop(adb_out("shell", "getprop", "ro.product.cpu.abi", serial=s))
         dns          = adb_out("shell", "settings", "get", "global", "private_dns_mode", serial=s)
         pkgv         = adb_out("shell", "settings", "get", "global", "package_verifier_user_consent", serial=s)
 
@@ -1437,16 +1932,20 @@ class App(ctk.CTk):
                 ime = line.split("=")[-1].strip()
                 break
 
-        label = f"{manufacturer} {model}".strip()
+        if manufacturer and model.lower().startswith(manufacturer.lower()):
+            label = model.strip()
+        else:
+            label = f"{manufacturer} {model}".strip()
         ip    = s.split(":")[0]
         port  = int(s.split(":")[-1]) if ":" in s else 5555
         if label:
             save_history(ip, label, port=port, touch_seen=True)
+            now_str = _dt.now().strftime("%Y-%m-%d %H:%M")
             existing = self.history.get(ip, {})
             if isinstance(existing, dict):
-                existing.update({"label": label, "port": port, "verified": True})
+                existing.update({"label": label, "port": port, "last_seen": now_str, "verified": True})
             else:
-                existing = {"label": label, "port": port, "last_seen": "", "verified": True}
+                existing = {"label": label, "port": port, "last_seen": now_str, "verified": True}
             self.history[ip] = existing
 
         def update():
@@ -1461,9 +1960,15 @@ class App(ctk.CTk):
             self.info_dns.configure(text=dns or "—")
             self.info_pkgverifier.configure(text=pkgv or "—")
             self.info_ime.configure(text=ime)
-            self.status_label.configure(
-                text=f"Connected: {label or s}  ({s})", text_color="#4CAF50")
+            self.log_frame.configure(border_color=SUCCESS)
+            self._set_tabs_enabled(True)
             self._populate_device_list()
+            self.connect_btn.configure(
+                text="Disconnect", fg_color=DANGER_BG,
+                hover_color=DANGER_HOVER, text_color=DANGER,
+                command=self._disconnect,
+            )
+            self.disconnect_btn.grid_remove()
 
         self.after(0, update)
         self._log(f"Device: {label}  |  Android: {android_ver}  |  ABI: {abi}  |  Battery: {battery}")
@@ -1494,6 +1999,10 @@ class App(ctk.CTk):
                 pkg = pkg[len("package:"):]
             if pkg:
                 self.pkg_listbox.insert("end", pkg)
+        if self.pkg_listbox.size() == 0:
+            self._pkg_empty_state.place(relx=0.5, rely=0.5, anchor="center")
+        else:
+            self._pkg_empty_state.place_forget()
 
     def _selected_package(self):
         sel = self.pkg_listbox.curselection()
@@ -1703,11 +2212,11 @@ class App(ctk.CTk):
     def _refresh_shizuku_status(self):
         apk_present = SHIZUKU_APK.exists()
         if apk_present:
-            self._shizuku_status_label.configure(text="shizuku.apk ready.", text_color="gray")
+            self._shizuku_status_label.configure(text="shizuku.apk ready.", text_color=TEXT_MUTED)
             self._shizuku_dl_btn.configure(state="disabled")
             self._shizuku_install_btn.configure(state="normal")
         else:
-            self._shizuku_status_label.configure(text="shizuku.apk not downloaded yet.", text_color="gray")
+            self._shizuku_status_label.configure(text="shizuku.apk not downloaded yet.", text_color=TEXT_DISABLED)
             self._shizuku_dl_btn.configure(state="normal")
             self._shizuku_install_btn.configure(state="disabled")
 
@@ -1909,7 +2418,7 @@ class App(ctk.CTk):
         def run():
             result = adb("disconnect")
             self.serial = None
-            self.after(0, lambda: self.status_label.configure(text="Not connected", text_color="gray"))
+            self.after(0, self._reset_connect_btn)
             self._log(result or "Disconnected all.")
         threading.Thread(target=run, daemon=True).start()
 
