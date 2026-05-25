@@ -3,6 +3,12 @@ name: Release
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - "**.md"
+      - "LICENSE"
+      - ".gitignore"
+      - "test_*.py"
+      - "**/test_*.py"
     tags: ["v*"]
   workflow_dispatch:
 
