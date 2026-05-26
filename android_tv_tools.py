@@ -19,7 +19,7 @@ def _base_dir() -> Path:
         return Path(sys.executable).parent
     return Path(__file__).parent
 
-VERSION      = "4.1.4"
+VERSION      = "4.1.5"
 _NO_WINDOW   = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 SCRIPT_DIR   = _base_dir()
