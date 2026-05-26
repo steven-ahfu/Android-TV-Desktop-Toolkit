@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo.png" alt="ATV Desktop Toolkit" width="600">
+  <img src="assets/ATV Tools.png" alt="ATV Desktop Toolkit" width="600">
 </p>
 
 # Android TV Desktop Toolkit
