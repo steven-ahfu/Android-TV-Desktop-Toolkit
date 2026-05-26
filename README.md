@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.png" alt="ATV Desktop Toolkit" width="600">
+</p>
+
 # Android TV Desktop Toolkit
 
 A Python/CustomTkinter desktop app for Windows and MacOS to manage Android TV and Google TV devices over ADB — no terminal required. Scan your network, manage packages, tune performance, sideload APKs, and capture screenshots from a single window.
