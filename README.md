@@ -9,9 +9,10 @@ A Python/CustomTkinter desktop app for Windows and MacOS to manage Android TV an
 **What you can do with it:**
 
 - **Info** — see device details at a glance: brand, model, processor, DNS settings, input method, and more
-- **Packages** — browse every app on your TV (including hidden system apps) and disable, enable, or uninstall them
+- **Packages** — browse every app on your TV (including hidden system apps), disable, enable, or uninstall them, and save any installed app's APK back to your PC
 - **Performance** — speed up your TV by optimizing app compilation, freezing background apps, and improving touch/remote response
 - **Install** — sideload APKs directly to your TV with Play Protect bypass built in, and download, install, or launch Shizuku for advanced app management
+- **Media** — mirror and control your TV with scrcpy, record the screen, and transfer files both ways — browse the device's storage to copy files to your PC, or send files from your PC to the device
 - **Tools** — open system settings on your TV from your PC, send text input remotely, or disconnect ADB with one click
 - **Screenshot** — capture screenshots from your TV and save them to your PC
 
@@ -69,7 +70,7 @@ Requires Python 3.12 or 3.13 (PyInstaller does not yet fully support 3.14):
 .\scripts\build.ps1
 ```
 
-Output lands in `dist/Android TV Desktop Toolkit/`. Zip that folder for distribution.
+This is a `--onefile` build, so the output is a single self-contained executable: `dist/Android TV Desktop Toolkit.exe`. Distribute that file directly. The script also drops a shortcut to it on your Desktop.
 
 ---
 

@@ -1,6 +1,6 @@
 [project]
 name = "android-tv-desktop-toolkit"
-version = "4.1.5"
+version = "4.1.6"
 requires-python = ">=3.10"
 dependencies = [
     "customtkinter",

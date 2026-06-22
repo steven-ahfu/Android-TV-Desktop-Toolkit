@@ -19,7 +19,7 @@ def _base_dir() -> Path:
         return Path(sys.executable).parent
     return Path(__file__).parent
 
-VERSION      = "4.1.5"
+VERSION      = "4.1.6"
 _NO_WINDOW   = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 SCRIPT_DIR   = _base_dir()
@@ -109,6 +109,42 @@ def _clean_prop(raw: str) -> str:
         if cleaned and not cleaned.startswith("*"):
             return cleaned
     return raw.strip()
+
+def _dev_quote(path: str) -> str:
+    """Single-quote a path for the on-device shell.
+    `adb shell` joins its argv with spaces and re-parses on the device, so a
+    path containing spaces must arrive already quoted."""
+    return "'" + path.replace("'", "'\\''") + "'"
+
+def _parse_ls(out: str):
+    """Parse `ls -1ap` output into ([(name, is_dir), ...], error).
+    Directories carry a trailing '/' from the -p flag. Returns a non-None error
+    string when the listing failed (timeout, ADB error, or all-`ls:`-error lines)."""
+    if out == "TIMEOUT":
+        return [], "Timed out listing directory (device slow or path very large)."
+    if out.startswith("ERROR:"):
+        return [], out
+    lines = [l.rstrip("\r") for l in out.splitlines()]
+    nonempty = [l for l in lines if l.strip()]
+    err_lines = [l for l in nonempty if l.strip().startswith("ls:")]
+    if nonempty and len(err_lines) == len(nonempty):
+        return [], "\n".join(err_lines)
+    entries = []
+    for name in lines:
+        if not name or name in ("./", "../", ".", ".."):
+            continue
+        if name.strip().startswith("ls:"):
+            continue
+        if name.startswith("* daemon") or name.startswith("adb:"):
+            continue
+        is_dir = name.endswith("/")
+        disp = name[:-1] if is_dir else name
+        if not disp:
+            continue
+        entries.append((disp, is_dir))
+    # directories first, then case-insensitive name order
+    entries.sort(key=lambda e: (not e[1], e[0].lower()))
+    return entries, None
 
 # ── device history (JSON) ──────────────────────────────────────────────────────
 import re as _re
@@ -797,6 +833,8 @@ class App(ctk.CTk):
                         command=self._pkg_enable).pack(side="left", padx=(0, 4))
         SecondaryButton(action_row, text="Get Version", height=36, width=100,
                         command=self._pkg_version).pack(side="left", padx=(0, 4))
+        SuccessButton(action_row, text="Save APK", height=36, width=95,
+                      command=self._pkg_save_apk).pack(side="left", padx=(0, 4))
         SecondaryButton(action_row, text="Clear Cache", height=36, width=100,
                         command=self._pkg_clear_cache).pack(side="left", padx=(0, 4))
         DangerButton(action_row, text="Clear Data", height=36, width=95,
@@ -945,8 +983,8 @@ class App(ctk.CTk):
 
         self._qi_apps = {
             "AdGuard TV":       {"file": DATA_DIR / "adguard_tv.apk",
-                                 "repo": "AdguardTeam/AdguardForAndroidTV",
-                                 "asset_suffix": ".apk",
+                                 "direct_url": "https://agrd.io/tvapk",
+                                 "homepage": "https://adguard.com/en/adguard-android-tv/overview.html",
                                  "description": "Ad blocker and content filter for Android TV"},
             "Aurora Store":     {"file": DATA_DIR / "aurora_store.apk",
                                  "repo": "AuroraOSS/AuroraStore",
@@ -975,8 +1013,9 @@ class App(ctk.CTk):
         for i, (name, meta) in enumerate(self._qi_apps.items()):
             g_col = i % 2
             g_row = i // 2
-            repo_url = (f"https://gitlab.com/{meta['repo']}" if meta.get("gitlab")
-                        else f"https://github.com/{meta['repo']}")
+            repo_url = (meta.get("homepage")
+                        or (f"https://gitlab.com/{meta['repo']}" if meta.get("gitlab")
+                            else f"https://github.com/{meta['repo']}"))
 
             cell = ctk.CTkFrame(qi_grid, fg_color=SURFACE_2, corner_radius=RADIUS_MD,
                                 border_width=1, border_color=BORDER)
@@ -1354,8 +1393,10 @@ class App(ctk.CTk):
         pull_row.grid_columnconfigure(0, weight=1)
         self._pull_path_entry = _RoundEntry(pull_row, placeholder_text="/sdcard/Download/file.mp4")
         self._pull_path_entry.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        SecondaryButton(pull_row, text="Browse device", width=120, height=36,
+                        command=self._open_device_browser).grid(row=0, column=1, padx=(0, 6))
         SecondaryButton(pull_row, text="Download", width=100, height=36,
-                        command=self._pull_file).grid(row=0, column=1)
+                        command=self._pull_file).grid(row=0, column=2)
 
     def _launch_scrcpy(self):
         if not self._require_connection():
@@ -1441,6 +1482,173 @@ class App(ctk.CTk):
             result = adb("pull", device_path, dest_dir, serial=self.serial, timeout=120)
             self._log(result or "File downloaded.")
         threading.Thread(target=run, daemon=True).start()
+
+    def _open_device_browser(self):
+        """Navigable file browser over the device's storage. Tap a folder to
+        enter it, tap a file to select it, then pull the selection to the PC."""
+        if not self._require_connection():
+            return
+
+        win = ctk.CTkToplevel(self)
+        win.title("Browse Device Files")
+        win.geometry("560x580")
+        win.configure(fg_color=APP_BG)
+        win.lift()
+        win.after(50, win.focus)
+
+        state = {"cwd": "/sdcard/", "selected": "/sdcard/", "sel_btn": None}
+
+        top = ctk.CTkFrame(win, fg_color="transparent")
+        top.pack(fill="x", padx=12, pady=(12, 2))
+        top.grid_columnconfigure(0, weight=1)
+        path_var = ctk.StringVar(value=state["cwd"])
+        path_entry = _RoundEntry(top, textvariable=path_var)
+        path_entry.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        SecondaryButton(top, text="Go", width=56, height=36,
+                        command=lambda: go_to(path_var.get())).grid(row=0, column=1, padx=(0, 6))
+        SecondaryButton(top, text="Up", width=56, height=36,
+                        command=lambda: go_up()).grid(row=0, column=2, padx=(0, 6))
+        SecondaryButton(top, text="↻", width=44, height=36,
+                        command=lambda: load()).grid(row=0, column=3)
+
+        ctk.CTkLabel(win, text="Folders (blue, end in /) open · files are selectable.",
+                     text_color=TEXT_DISABLED, anchor="w",
+                     font=ctk.CTkFont(family=_FONT, size=11)).pack(fill="x", padx=14, pady=(0, 2))
+
+        list_frame = ctk.CTkScrollableFrame(
+            win, fg_color=SURFACE_1, corner_radius=RADIUS_MD,
+            border_width=1, border_color=BORDER,
+            scrollbar_button_color=SURFACE_3,
+            scrollbar_button_hover_color=SECONDARY_HOVER)
+        list_frame.pack(fill="both", expand=True, padx=12, pady=4)
+
+        sel_var = ctk.StringVar(value=f"Selected: {state['selected']}")
+        ctk.CTkLabel(win, textvariable=sel_var, anchor="w", text_color=TEXT_MUTED,
+                     font=ctk.CTkFont(family=_FONT, size=11)).pack(fill="x", padx=14, pady=(2, 0))
+        status_var = ctk.StringVar(value="")
+        ctk.CTkLabel(win, textvariable=status_var, anchor="w", text_color=TEXT_DISABLED,
+                     font=ctk.CTkFont(family=_FONT, size=11)).pack(fill="x", padx=14, pady=(0, 2))
+
+        btn_row = ctk.CTkFrame(win, fg_color="transparent")
+        btn_row.pack(fill="x", padx=12, pady=(0, 12))
+        SecondaryButton(btn_row, text="Use Path", width=100, height=36,
+                        command=lambda: use_path()).pack(side="left")
+        SecondaryButton(btn_row, text="Close", width=88, height=36,
+                        command=win.destroy).pack(side="right")
+        dl_btn = SuccessButton(btn_row, text="Download to PC", width=150, height=36,
+                               command=lambda: download())
+        dl_btn.pack(side="right", padx=(0, 8))
+
+        def set_selected(path, btn=None):
+            state["selected"] = path
+            sel_var.set(f"Selected: {path}")
+            if state["sel_btn"] is not None:
+                try:
+                    state["sel_btn"].configure(fg_color=SURFACE_1, border_color=BORDER)
+                except Exception:
+                    pass
+            state["sel_btn"] = btn
+            if btn is not None:
+                btn.configure(fg_color=PRIMARY_MUTED, border_color=PRIMARY)
+
+        def render(entries):
+            for w in list_frame.winfo_children():
+                w.destroy()
+            state["sel_btn"] = None
+            if not entries:
+                ctk.CTkLabel(list_frame, text="(empty folder)", text_color=TEXT_DISABLED,
+                             font=ctk.CTkFont(family=_FONT, size=12)).pack(pady=20)
+                return
+            for name, is_dir in entries:
+                text = (name + "/") if is_dir else name
+                b = ctk.CTkButton(
+                    list_frame, text=text, anchor="w", height=32,
+                    corner_radius=RADIUS_SM, fg_color=SURFACE_1,
+                    hover_color=SURFACE_2,
+                    text_color=(PRIMARY if is_dir else TEXT),
+                    border_width=1, border_color=BORDER,
+                    font=ctk.CTkFont(family=_FONT, size=12))
+                if is_dir:
+                    b.configure(command=lambda n=name: enter_dir(n))
+                else:
+                    b.configure(command=lambda n=name, bt=b: set_selected(state["cwd"] + n, bt))
+                b.pack(fill="x", padx=6, pady=2)
+
+        def load():
+            cwd = state["cwd"]
+            path_var.set(cwd)
+            set_selected(cwd)  # default: download the current folder if no file is picked
+            for w in list_frame.winfo_children():
+                w.destroy()
+            ctk.CTkLabel(list_frame, text="Loading…", text_color=TEXT_MUTED,
+                         font=ctk.CTkFont(family=_FONT, size=12)).pack(pady=20)
+
+            def run():
+                out = adb("shell", "ls", "-1ap", _dev_quote(cwd), serial=self.serial, timeout=20)
+                entries, err = _parse_ls(out)
+
+                def apply():
+                    if err:
+                        for w in list_frame.winfo_children():
+                            w.destroy()
+                        ctk.CTkLabel(list_frame, text=err, text_color=DANGER,
+                                     font=ctk.CTkFont(family=_FONT, size=12),
+                                     wraplength=480, justify="left").pack(pady=20, padx=10)
+                    else:
+                        render(entries)
+                self.after(0, apply)
+            threading.Thread(target=run, daemon=True).start()
+
+        def enter_dir(name):
+            state["cwd"] = state["cwd"] + name + "/"
+            load()
+
+        def go_up():
+            cwd = state["cwd"].rstrip("/")
+            if not cwd:
+                return
+            parent = cwd.rsplit("/", 1)[0]
+            state["cwd"] = (parent + "/") if parent else "/"
+            load()
+
+        def go_to(path):
+            path = path.strip()
+            if not path:
+                return
+            if not path.endswith("/"):
+                path += "/"
+            state["cwd"] = path
+            load()
+
+        def use_path():
+            self._pull_path_entry.delete(0, "end")
+            self._pull_path_entry.insert(0, state["selected"])
+            win.destroy()
+
+        def download():
+            sel = state["selected"]
+            dest = filedialog.askdirectory(title="Select destination folder")
+            if not dest:
+                return
+            dl_btn.configure(state="disabled", text="Downloading…")
+            status_var.set(f"Pulling {sel} …")
+
+            def run():
+                self._log(f"Pulling {sel} from device...")
+                result = adb("pull", sel, dest, serial=self.serial, timeout=300)
+                self._log(result or "Download complete.")
+
+                def done():
+                    last = result.splitlines()[-1] if result else "Done."
+                    status_var.set(last)
+                    try:
+                        dl_btn.configure(state="normal", text="Download to PC")
+                    except Exception:
+                        pass
+                self.after(0, done)
+            threading.Thread(target=run, daemon=True).start()
+
+        load()
 
     def _build_remote_tab(self):
         outer = _scrollable(self._tab_frames["Remote"])
@@ -2088,6 +2296,53 @@ class App(ctk.CTk):
             self._log(f"{pkg}  version: {version}")
         threading.Thread(target=run, daemon=True).start()
 
+    def _pkg_save_apk(self):
+        """Pull the installed APK(s) for the selected package to the PC.
+        Resolves the on-device paths via `pm path`, which returns the base APK
+        plus any split APKs for app-bundle installs."""
+        if not self._require_connection():
+            return
+        pkg = self._selected_package()
+        if not pkg:
+            return
+        dest_dir = filedialog.askdirectory(title=f"Save APK for {pkg} — choose folder")
+        if not dest_dir:
+            return
+
+        def run():
+            self._log(f"Resolving APK path for {pkg}...")
+            raw = adb_out("shell", "pm", "path", pkg, serial=self.serial, timeout=15)
+            paths = [l.strip()[len("package:"):] for l in raw.splitlines()
+                     if l.strip().startswith("package:")]
+            if not paths:
+                self._log(f"Could not resolve APK path for {pkg}: {raw.strip() or 'no path returned'}")
+                return
+
+            if len(paths) == 1:
+                # Single APK — save directly as <package>.apk
+                targets = [(paths[0], os.path.join(dest_dir, f"{pkg}.apk"))]
+            else:
+                # Split APKs (app bundle) — keep the set together in <package>/
+                sub = os.path.join(dest_dir, pkg)
+                try:
+                    os.makedirs(sub, exist_ok=True)
+                except Exception as e:
+                    self._log(f"Could not create folder {sub}: {e}")
+                    return
+                targets = [(p, os.path.join(sub, os.path.basename(p))) for p in paths]
+
+            self._log(f"Pulling {len(targets)} APK file(s) for {pkg}...")
+            ok = 0
+            for remote, local in targets:
+                result = adb("pull", remote, local, serial=self.serial, timeout=300)
+                if os.path.exists(local):
+                    ok += 1
+                    self._log(f"  Saved {os.path.basename(local)}")
+                else:
+                    self._log(f"  Failed: {remote} — {result.strip()}")
+            self._log(f"Saved {ok}/{len(targets)} APK file(s) to {dest_dir}")
+        threading.Thread(target=run, daemon=True).start()
+
     def _pkg_clear_cache(self):
         if not self._require_connection():
             return
@@ -2266,17 +2521,31 @@ class App(ctk.CTk):
                 result = adb("install", "-r", "-g", shizuku_apk, serial=self.serial, timeout=60)
                 adb("shell", "settings", "put", "global", "package_verifier_user_consent", "1", serial=self.serial)
                 self._log(result or "Shizuku installed.")
+            # Clicking Install should leave Shizuku running, not just installed.
+            self._start_shizuku()
         threading.Thread(target=run, daemon=True).start()
+
+    def _start_shizuku(self):
+        """Open Shizuku (so it writes start.sh), wait for that file, then start
+        the service over ADB. Synchronous — call from a background thread."""
+        import time
+        start_sh = "/sdcard/Android/data/moe.shizuku.privileged.api/start.sh"
+        self._log("Opening Shizuku...")
+        adb("shell", "monkey", "-p", "moe.shizuku.privileged.api", "1", serial=self.serial)
+        # First launch writes start.sh lazily; wait briefly for it to appear so
+        # the very first start doesn't fail with "No such file".
+        for _ in range(6):
+            if "No such file" not in adb("shell", "ls", start_sh, serial=self.serial):
+                break
+            time.sleep(1)
+        self._log("Starting Shizuku service...")
+        result = adb("shell", "sh", start_sh, serial=self.serial)
+        self._log(result or "Shizuku service started.")
 
     def _launch_shizuku(self):
         if not self._require_connection():
             return
-        def run():
-            self._log("Launching Shizuku...")
-            adb("shell", "monkey", "-p", "moe.shizuku.privileged.api", "1", serial=self.serial)
-            result = adb("shell", "sh", "/sdcard/Android/data/moe.shizuku.privileged.api/start.sh", serial=self.serial)
-            self._log(result or "Shizuku launched.")
-        threading.Thread(target=run, daemon=True).start()
+        threading.Thread(target=self._start_shizuku, daemon=True).start()
 
     def _browse_bulk_folder(self):
         folder = filedialog.askdirectory(title="Select folder with APK files")
@@ -2307,7 +2576,10 @@ class App(ctk.CTk):
         def run():
             try:
                 self._log(f"Fetching latest {name} release...")
-                if meta.get("gitlab"):
+                if meta.get("direct_url"):
+                    # Closed-source app distributed from its own site (e.g. AdGuard TV).
+                    apk_url = meta["direct_url"]
+                elif meta.get("gitlab"):
                     # Aurora Store on GitLab
                     api = "https://gitlab.com/api/v4/projects/AuroraOSS%2FAuroraStore/releases"
                     req = urllib.request.Request(api, headers={"User-Agent": f"AndroidTVDesktopToolkit/{VERSION}"})
@@ -2320,6 +2592,11 @@ class App(ctk.CTk):
                             if link["url"].endswith(".apk"):
                                 apk_url = link["url"]
                                 break
+                        # Recent Aurora releases no longer attach .apk asset links;
+                        # fall back to the stable download URL built from the tag.
+                        if not apk_url and release.get("tag_name"):
+                            apk_url = ("https://auroraoss.com/downloads/AuroraStore/"
+                                       f"Release/AuroraStore-{release['tag_name']}.apk")
                 else:
                     repo = meta["repo"]
                     api = f"https://api.github.com/repos/{repo}/releases/latest"
@@ -2343,7 +2620,13 @@ class App(ctk.CTk):
                     self.after(0, lambda: meta["dl_btn"].configure(state="normal", text="Download"))
                     return
                 self._log(f"Downloading {name}...")
-                urllib.request.urlretrieve(apk_url, str(meta["file"]))
+                # Stream with a browser User-Agent — some hosts (e.g. auroraoss.com)
+                # reject the default urllib agent with HTTP 403.
+                dl_req = urllib.request.Request(apk_url, headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+                with urllib.request.urlopen(dl_req, timeout=60) as resp, \
+                        open(meta["file"], "wb") as fh:
+                    shutil.copyfileobj(resp, fh)
                 self._log(f"{name} downloaded.")
                 def refresh():
                     meta["dl_btn"].configure(state="disabled", text="Download")
