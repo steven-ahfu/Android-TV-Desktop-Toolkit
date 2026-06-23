@@ -19,7 +19,7 @@ def _base_dir() -> Path:
         return Path(sys.executable).parent
     return Path(__file__).parent
 
-VERSION      = "4.1.6"
+VERSION      = "4.1.7"
 _NO_WINDOW   = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 SCRIPT_DIR   = _base_dir()
@@ -550,6 +550,7 @@ class App(ctk.CTk):
             self.iconbitmap(str(_icon))
 
         self.serial = None
+        self.device_abis = []   # connected device's CPU ABIs, preferred first
         self.history = load_history()
 
         self._build_ui()
@@ -993,15 +994,37 @@ class App(ctk.CTk):
                                  "description": "An unofficial FOSS client to Google Play."},
             "Flicky":           {"file": DATA_DIR / "flicky.apk",
                                  "repo": "mlm-games/flicky",
-                                 "asset_suffix": ".apk",
+                                 "arch_assets": {"arm64-v8a": "arm64-v8a",
+                                                 "armeabi-v7a": "armeabi-v7a",
+                                                 "x86_64": "x86_64",
+                                                 "x86": "x86"},
+                                 "asset_fallback": "universal",
                                  "description": "Yet Another FDroid Client (wide screen / TV friendly)"},
+            "LocalSend":        {"file": DATA_DIR / "localsend.apk",
+                                 "repo": "localsend/localsend",
+                                 "arch_assets": {"arm64-v8a": "arm64v8",
+                                                 "armeabi-v7a": "arm32v7",
+                                                 "x86_64": "x64"},
+                                 "description": "Open-source cross-platform AirDrop alternative — share files over the local network"},
+            "ObtainX":          {"file": DATA_DIR / "obtainx.apk",
+                                 "repo": "bikram-agarwal/ObtainX",
+                                 "arch_assets": {"arm64-v8a": "arm64-v8a",
+                                                 "armeabi-v7a": "armeabi-v7a",
+                                                 "x86_64": "x86_64"},
+                                 "asset_exclude": ["fdroid"],
+                                 "description": "Get Android app updates straight from the source"},
             "SmartTube Stable": {"file": DATA_DIR / "smarttube_stable.apk",
                                  "repo": "yuliskov/SmartTube",
                                  "asset_contains": "smarttube_stable",
+                                 "arch_assets": {"arm64-v8a": "arm64-v8a",
+                                                 "armeabi-v7a": "armeabi-v7a",
+                                                 "x86": "x86"},
+                                 "asset_fallback": "universal",
                                  "description": "Browse media content with your own rules on Android TV"},
             "TizenTube":        {"file": DATA_DIR / "tizentube.apk",
                                  "repo": "reisxd/TizenTubeCobalt",
-                                 "asset_suffix": ".apk",
+                                 "arch_assets": {"arm64-v8a": "cobalt-arm64",
+                                                 "armeabi-v7a": "cobalt-arm."},
                                  "description": "Experience TizenTube on other devices that are not Tizen."},
         }
 
@@ -2011,6 +2034,7 @@ class App(ctk.CTk):
             if self.serial:
                 adb("disconnect", self.serial)
             self.serial = None
+            self.device_abis = []
             self.after(0, self._reset_connect_btn)
             self._log("Disconnected.")
         threading.Thread(target=run, daemon=True).start()
@@ -2113,6 +2137,11 @@ class App(ctk.CTk):
         build_id     = _clean_prop(adb_out("shell", "getprop", "ro.build.display.id", serial=s))
         serial_no    = _clean_prop(adb_out("shell", "getprop", "ro.serialno", serial=s))
         abi          = _clean_prop(adb_out("shell", "getprop", "ro.product.cpu.abi", serial=s))
+        abilist      = _clean_prop(adb_out("shell", "getprop", "ro.product.cpu.abilist", serial=s))
+        # Remember the device's supported ABIs (preferred first) so quick-install
+        # can pick the matching native build instead of guessing. e.g. Chromecast
+        # with Google TV reports armeabi-v7a, not arm64-v8a.
+        self.device_abis = [a.strip() for a in abilist.split(",") if a.strip()] or ([abi] if abi else [])
         dns          = adb_out("shell", "settings", "get", "global", "private_dns_mode", serial=s)
         pkgv         = adb_out("shell", "settings", "get", "global", "package_verifier_user_consent", serial=s)
 
@@ -2575,6 +2604,35 @@ class App(ctk.CTk):
         meta["dl_btn"].configure(state="disabled", text="Downloading...")
         def run():
             try:
+                # Apps with per-CPU builds: pick the variant matching the
+                # connected device's ABI instead of guessing. Requires a
+                # connection — e.g. Chromecast with Google TV is armeabi-v7a,
+                # not arm64-v8a, so a hardcoded guess would install the wrong one.
+                arch_map = meta.get("arch_assets")
+                want_token = want_label = None   # asset substring + label for the device's CPU
+                if arch_map:
+                    if not self.serial or not self.device_abis:
+                        self._log(f"Connect to a device first — {name} ships per-CPU "
+                                  "builds and the right one depends on the device.")
+                        self.after(0, lambda: meta["dl_btn"].configure(state="normal", text="Download"))
+                        return
+                    # Walk the device's ABIs (preferred first) and take the first
+                    # one this app actually ships a build for.
+                    for abi in self.device_abis:
+                        if abi in arch_map:
+                            want_token, want_label = arch_map[abi], abi
+                            break
+                    if not want_token:
+                        fb = meta.get("asset_fallback")
+                        if fb:   # e.g. a universal build that runs on any CPU
+                            want_token = fb
+                            want_label = f"{fb} (no native {self.device_abis[0]} build)"
+                        else:
+                            self._log(f"{name} has no build for this device's CPU "
+                                      f"({', '.join(self.device_abis)}).")
+                            self.after(0, lambda: meta["dl_btn"].configure(state="normal", text="Download"))
+                            return
+
                 self._log(f"Fetching latest {name} release...")
                 if meta.get("direct_url"):
                     # Closed-source app distributed from its own site (e.g. AdGuard TV).
@@ -2608,7 +2666,18 @@ class App(ctk.CTk):
                     assets = data.get("assets", [])
                     contains = meta.get("asset_contains", "")
                     suffix = meta.get("asset_suffix", ".apk")
-                    if contains:
+                    exclude = meta.get("asset_exclude", [])
+                    if want_token:
+                        # Match the CPU-specific (or fallback) build, still
+                        # honoring any base name filter (e.g. "smarttube_stable").
+                        apk_url = next((a["browser_download_url"] for a in assets
+                                        if a["name"].endswith(".apk")
+                                        and want_token in a["name"].lower()
+                                        and (not contains or contains in a["name"].lower())
+                                        and not any(x in a["name"].lower() for x in exclude)), None)
+                        if apk_url:
+                            self._log(f"Selected {want_label} build for this device.")
+                    elif contains:
                         apk_url = next((a["browser_download_url"] for a in assets
                                         if contains in a["name"].lower() and a["name"].endswith(".apk")), None)
                     else:
@@ -2701,6 +2770,7 @@ class App(ctk.CTk):
         def run():
             result = adb("disconnect")
             self.serial = None
+            self.device_abis = []
             self.after(0, self._reset_connect_btn)
             self._log(result or "Disconnected all.")
         threading.Thread(target=run, daemon=True).start()
