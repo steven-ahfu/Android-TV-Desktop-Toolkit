@@ -16,15 +16,27 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 $venvPython = "$root\.venv\Scripts\python.exe"
 $venvPyInstaller = "$root\.venv\Scripts\pyinstaller.exe"
 
-& $venvPyInstaller `
-    --noconfirm `
-    --onefile `
-    --windowed `
-    --name "Android TV Desktop Toolkit" `
-    --icon "$root\assets\icon.ico" `
-    --add-data "$root\assets;assets" `
-    --add-data "$(& $venvPython -c 'import customtkinter, os; print(os.path.dirname(customtkinter.__file__))');customtkinter" `
-    "$root\android_tv_tools.py"
+# Resolve the Tcl/Tk runtime directory from the base Python (needed for Tkinter
+# apps bundled with PyInstaller — the venv doesn't copy these files, so we pull
+# them from the base Python identified in pyvenv.cfg).
+$tclDir = & $venvPython -c "import sys,os; p=os.path.join(sys.prefix,'tcl'); print(p if os.path.isdir(p) else '')"
+
+$extraArgs = @(
+    "--noconfirm",
+    "--onefile",
+    "--windowed",
+    "--name", "Android TV Desktop Toolkit",
+    "--icon", "$root\assets\icon.ico",
+    "--add-data", "$root\assets;assets",
+    "--add-data", "$(& $venvPython -c 'import customtkinter, os; print(os.path.dirname(customtkinter.__file__))');customtkinter"
+)
+
+if ($tclDir) {
+    $extraArgs += "--add-data"
+    $extraArgs += "$tclDir;tcl"
+}
+
+& $venvPyInstaller @extraArgs "$root\android_tv_tools.py"
 
 Write-Output ""
 Write-Output "Build complete. Output: dist\Android TV Desktop Toolkit.exe"

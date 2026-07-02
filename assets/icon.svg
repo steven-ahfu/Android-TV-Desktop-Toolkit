@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <!-- ATV Desktop Toolkit — wireless display mark, One Dark palette -->
+  <rect width="256" height="256" rx="52" fill="#282C34"/>
+
+  <!-- Signal arcs, concentric on the monitor's top-center (128,122) -->
+  <g fill="none" stroke="#61AFEF" stroke-width="11" stroke-linecap="round">
+    <path d="M80 74 A68 68 0 0 1 176 74" stroke-opacity="0.35"/>
+    <path d="M95.5 89.5 A46 46 0 0 1 160.5 89.5" stroke-opacity="0.65"/>
+    <path d="M111 105 A24 24 0 0 1 145 105"/>
+  </g>
+
+  <!-- Monitor -->
+  <rect x="78" y="122" width="100" height="64" rx="12" fill="none" stroke="#61AFEF" stroke-width="11"/>
+  <path d="M128 192 V204 M102 208 H154" fill="none" stroke="#61AFEF" stroke-width="11" stroke-linecap="round"/>
+
+  <!-- Status LED -->
+  <circle cx="161" cy="169" r="6" fill="#98C379"/>
+</svg>
