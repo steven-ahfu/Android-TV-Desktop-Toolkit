@@ -19,7 +19,7 @@ def _base_dir() -> Path:
         return Path(sys.executable).parent
     return Path(__file__).parent
 
-VERSION      = "4.1.8"
+VERSION      = "4.1.9"
 _NO_WINDOW   = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 SCRIPT_DIR   = _base_dir()
@@ -67,6 +67,19 @@ HISTORY_FILE   = DATA_DIR / "Device_history.txt"   # legacy flat-text (read-only
 DEVICES_FILE   = DATA_DIR / "devices.json"          # new JSON store
 SHIZUKU_APK    = DATA_DIR / "shizuku.apk"
 SCREENSHOT_TMP = DATA_DIR / "_screenshot_tmp.png"
+
+SHIZUKU_PKG = "moe.shizuku.privileged.api"
+# Modern Shizuku (v13+) bundles a native starter, libshizuku.so, inside the
+# APK; exec-ing it from an adb shell (uid 2000) starts the server directly —
+# no wireless-debugging pairing, no start.sh. The APK dir name is
+# re-randomized on every (re)install, so resolve it via `pm path` at runtime.
+# Prints NO_STARTER on pre-v13 builds, which still use the legacy script.
+SHIZUKU_START_CMD = (
+    "p=$(pm path moe.shizuku.privileged.api | head -n1 | sed 's/^package://; s#/base.apk$##'); "
+    'd=$(ls "$p/lib" 2>/dev/null | head -n1); '
+    'if [ -n "$d" ] && [ -f "$p/lib/$d/libshizuku.so" ]; then "$p/lib/$d/libshizuku.so"; '
+    "else echo NO_STARTER; fi")
+SHIZUKU_LEGACY_START = "/sdcard/Android/data/moe.shizuku.privileged.api/start.sh"
 
 # ── adb helpers ────────────────────────────────────────────────────────────────
 _LOG_FILE = DATA_DIR / "adb_calls.log"
@@ -535,6 +548,17 @@ def _scrollable(parent, **kwargs):
 
 
 # ── main app ───────────────────────────────────────────────────────────────────
+def _pretty_pkg_name(pkg):
+    """Best-effort display name derived from the package id.
+
+    Real app labels live in APK resources and are not exposed by any adb
+    shell command without aapt on the device, so this prettifies the
+    package id instead (com.netflix.ninja -> "Netflix Ninja")."""
+    parts = [p for p in pkg.split(".") if p]
+    words = [w for w in parts[1:] if w != "android"] or parts[-1:]
+    return " ".join(w.capitalize() for w in words)
+
+
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
@@ -805,7 +829,6 @@ class App(ctk.CTk):
             row=len(fields), column=0, columnspan=2, padx=14, pady=14)
 
     def _build_packages_tab(self):
-        import tkinter as tk
         import tkinter.ttk as ttk
         outer = self._tab_frames["Packages"]
 
@@ -816,12 +839,21 @@ class App(ctk.CTk):
                    command=lambda: self._list_packages("-s")).pack(side="left", padx=(0, 4))
         ChipButton(chip_row, text="List All",
                    command=lambda: self._list_packages("")).pack(side="left", padx=(0, 4))
+        ChipButton(chip_row, text="List User",
+                   command=lambda: self._list_packages("-3")).pack(side="left", padx=(0, 4))
         ChipButton(chip_row, text="Uninstalled",
                    command=lambda: self._list_packages("-u")).pack(side="left", padx=(0, 4))
         ChipButton(chip_row, text="Play Store",
                    command=self._list_playstore_pkgs).pack(side="left", padx=(0, 4))
         ChipButton(chip_row, text="Sideloaded",
                    command=self._list_sideloaded_pkgs).pack(side="left")
+
+        self._pkg_all = []
+        self._pkg_meta = {}   # pkg -> {"name": str, "version": str}
+        self._pkg_filter_entry = _RoundEntry(chip_row, width=170, height=34,
+                                             placeholder_text="Filter packages…")
+        self._pkg_filter_entry.pack(side="right")
+        self._pkg_filter_entry.bind("<KeyRelease>", lambda _e: self._apply_pkg_filter())
 
         # pack bottom row before the expanding list so it anchors to the bottom
         action_row = ctk.CTkFrame(outer, fg_color="transparent")
@@ -856,14 +888,32 @@ class App(ctk.CTk):
         scrollbar = ttk.Scrollbar(list_frame, orient="vertical", style="Dark.Vertical.TScrollbar")
         scrollbar.grid(row=0, column=1, sticky="ns", padx=(0, 4), pady=8)
 
-        self.pkg_listbox = tk.Listbox(
-            list_frame, yscrollcommand=scrollbar.set, selectmode="single",
-            bg=SIDEBAR_BG, fg=TEXT, selectbackground=PRIMARY_MUTED,
-            selectforeground=PRIMARY,
-            font=("Consolas", 11), relief="flat", borderwidth=0,
-            activestyle="none", highlightthickness=0)
-        self.pkg_listbox.grid(row=0, column=0, sticky="nsew", padx=(6, 0), pady=8)
-        scrollbar.config(command=self.pkg_listbox.yview)
+        # Dark-styled package table; Ctrl/Shift-click selects multiple rows
+        _sb_style.configure("Pkg.Treeview",
+            background=SIDEBAR_BG, fieldbackground=SIDEBAR_BG, foreground=TEXT,
+            bordercolor=BORDER, borderwidth=0, relief="flat",
+            rowheight=26, font=("Consolas", 11))
+        _sb_style.configure("Pkg.Treeview.Heading",
+            background=SURFACE_1, foreground=TEXT_MUTED, relief="flat",
+            font=(_FONT, 10, "bold"))
+        _sb_style.map("Pkg.Treeview",
+            background=[("selected", PRIMARY_MUTED)],
+            foreground=[("selected", PRIMARY)])
+        _sb_style.map("Pkg.Treeview.Heading",
+            background=[("active", SURFACE_2)])
+
+        self.pkg_tree = ttk.Treeview(
+            list_frame, columns=("package", "name", "version"), show="headings",
+            selectmode="extended", style="Pkg.Treeview",
+            yscrollcommand=scrollbar.set)
+        self.pkg_tree.heading("package", text="Package")
+        self.pkg_tree.heading("name", text="App Name")
+        self.pkg_tree.heading("version", text="Version")
+        self.pkg_tree.column("package", width=330, anchor="w")
+        self.pkg_tree.column("name", width=190, anchor="w")
+        self.pkg_tree.column("version", width=110, anchor="w", stretch=False)
+        self.pkg_tree.grid(row=0, column=0, sticky="nsew", padx=(6, 0), pady=8)
+        scrollbar.config(command=self.pkg_tree.yview)
 
         # Empty state — shown by default, hidden once packages load
         self._pkg_empty_state = EmptyState(
@@ -983,10 +1033,6 @@ class App(ctk.CTk):
                      text_color=TEXT).pack(anchor="w", padx=14, pady=(12, 8))
 
         self._qi_apps = {
-            "AdGuard TV":       {"file": DATA_DIR / "adguard_tv.apk",
-                                 "direct_url": "https://agrd.io/tvapk",
-                                 "homepage": "https://adguard.com/en/adguard-android-tv/overview.html",
-                                 "description": "Ad blocker and content filter for Android TV"},
             "Aurora Store":     {"file": DATA_DIR / "aurora_store.apk",
                                  "repo": "AuroraOSS/AuroraStore",
                                  "asset_suffix": ".apk",
@@ -1006,6 +1052,16 @@ class App(ctk.CTk):
                                                  "armeabi-v7a": "arm32v7",
                                                  "x86_64": "x64"},
                                  "description": "Open-source cross-platform AirDrop alternative — share files over the local network"},
+            "MaTVT":            {"file": DATA_DIR / "matvt.apk",
+                                 "repo": "virresh/matvt",
+                                 # Pinned: later builds live on a fork; 1.0.7-pre is
+                                 # the last release on this repo with the ADB variant.
+                                 "tag": "v1.0.7-pre",
+                                 "asset_contains": "adb",
+                                 "post_install": [("shell", "pm", "grant",
+                                                   "io.github.virresh.matvt",
+                                                   "android.permission.WRITE_SECURE_SETTINGS")],
+                                 "description": "Virtual mouse for Android TV — control apps that don't support D-pad navigation"},
             "ObtainX":          {"file": DATA_DIR / "obtainx.apk",
                                  "repo": "bikram-agarwal/ObtainX",
                                  "arch_assets": {"arm64-v8a": "arm64-v8a",
@@ -1025,7 +1081,7 @@ class App(ctk.CTk):
                                  "repo": "reisxd/TizenTubeCobalt",
                                  "arch_assets": {"arm64-v8a": "cobalt-arm64",
                                                  "armeabi-v7a": "cobalt-arm."},
-                                 "description": "Experience TizenTube on other devices that are not Tizen."},
+                                 "description": "TizenTube Cobalt enhances YouTube viewing experience by removing ads, adding SponsorBlock support, and providing useful features like video speed control."},
         }
 
         qi_grid = ctk.CTkFrame(qi_frame, fg_color="transparent")
@@ -1053,9 +1109,18 @@ class App(ctk.CTk):
             name_lbl.bind("<Leave>", lambda e: e.widget.configure(cursor=""))
 
             if meta.get("description"):
-                ctk.CTkLabel(cell, text=meta["description"], text_color=TEXT_DISABLED,
-                             font=ctk.CTkFont(family=_FONT, size=9),
-                             wraplength=220, anchor="w", justify="left").pack(fill="x", padx=10, pady=(0, 6))
+                desc_lbl = ctk.CTkLabel(cell, text=meta["description"], text_color=TEXT_DISABLED,
+                                        font=ctk.CTkFont(family=_FONT, size=9),
+                                        wraplength=220, anchor="w", justify="left")
+                desc_lbl.pack(fill="x", padx=10, pady=(0, 6))
+
+                # Wrap at the card's real width — a fixed wraplength breaks
+                # lines a third of the way across once the window is wide.
+                def _fit_wrap(event, lbl=desc_lbl):
+                    want = max(event.width - 12, 150)
+                    if abs(lbl.cget("wraplength") - want) > 4:
+                        lbl.configure(wraplength=want)
+                desc_lbl.bind("<Configure>", _fit_wrap)
 
             btn_row = ctk.CTkFrame(cell, fg_color="transparent")
             btn_row.pack(fill="x", padx=8, pady=(0, 8))
@@ -2021,6 +2086,8 @@ class App(ctk.CTk):
             result = adb("connect", serial)
             self._log(result)
             if "connected" in result.lower() or "already" in result.lower():
+                if self.serial != serial:
+                    self._pkg_meta = {}   # versions are per-device
                 self.serial = serial
                 self._refresh_info_async()
             else:
@@ -2229,60 +2296,108 @@ class App(ctk.CTk):
         threading.Thread(target=run, daemon=True).start()
 
     def _show_packages(self, text):
-        self.pkg_listbox.delete(0, "end")
+        self._pkg_all = []
+        seen = set()   # tree iids are package ids, so duplicates would crash insert
         for line in text.splitlines():
             pkg = line.strip()
             if pkg.startswith("package:"):
                 pkg = pkg[len("package:"):]
-            if pkg:
-                self.pkg_listbox.insert("end", pkg)
-        if self.pkg_listbox.size() == 0:
-            self._pkg_empty_state.place(relx=0.5, rely=0.5, anchor="center")
-        else:
-            self._pkg_empty_state.place_forget()
+            if pkg and pkg not in seen:
+                seen.add(pkg)
+                self._pkg_all.append(pkg)
+        self._apply_pkg_filter()
+        self._fetch_pkg_meta_async()
 
-    def _selected_package(self):
-        sel = self.pkg_listbox.curselection()
+    def _apply_pkg_filter(self):
+        query = self._pkg_filter_entry.get().strip().lower()
+        self.pkg_tree.delete(*self.pkg_tree.get_children())
+        for pkg in self._pkg_all:
+            meta = self._pkg_meta.get(pkg, {})
+            name = meta.get("name") or _pretty_pkg_name(pkg)
+            if query and query not in pkg.lower() and query not in name.lower():
+                continue
+            self.pkg_tree.insert("", "end", iid=pkg,
+                                 values=(pkg, name, meta.get("version", "")))
+        # Empty state only when no list is loaded; a filter with no
+        # matches just leaves the list blank next to the filled query.
+        if self._pkg_all:
+            self._pkg_empty_state.place_forget()
+        else:
+            self._pkg_empty_state.place(relx=0.5, rely=0.5, anchor="center")
+
+    def _fetch_pkg_meta_async(self):
+        """Fill the Version column from one `dumpsys package packages` pass.
+
+        A single bulk dump is used instead of per-package dumpsys calls so a
+        300-package listing costs one adb round-trip. App names have no adb
+        source without aapt, so they stay heuristic (_pretty_pkg_name)."""
+        missing = [p for p in self._pkg_all if p not in self._pkg_meta]
+        if not missing or not self.serial:
+            return
+        def run():
+            self._log("Fetching package versions...")
+            raw = adb_out("shell", "dumpsys", "package", "packages",
+                          serial=self.serial, timeout=60)
+            found, current = {}, None
+            for line in raw.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("Package ["):
+                    current = stripped[len("Package ["):].split("]")[0]
+                elif current and stripped.startswith("versionName="):
+                    # first block wins; "Hidden system packages:" repeats later
+                    found.setdefault(current, stripped[len("versionName="):])
+                    current = None
+            for pkg in missing:
+                self._pkg_meta[pkg] = {"name": _pretty_pkg_name(pkg),
+                                       "version": found.get(pkg, "")}
+            self._log(f"Loaded versions for {len(found)} packages.")
+            self.after(0, self._apply_pkg_filter)
+        threading.Thread(target=run, daemon=True).start()
+
+    def _selected_packages(self):
+        """Return the selected package ids (tree iids are package names)."""
+        sel = list(self.pkg_tree.selection())
         if not sel:
             self._log("No package selected.")
-            return None
-        return self.pkg_listbox.get(sel[0])
+        return sel
+
+    def _pkg_batch(self, verb, cmd_builder, confirm=False, timeout=10):
+        """Run an adb command over every selected package, sequentially.
+
+        confirm=True asks once before touching multiple packages — used for
+        the destructive actions (uninstall, clear data)."""
+        if not self._require_connection():
+            return
+        pkgs = self._selected_packages()
+        if not pkgs:
+            return
+        if confirm and len(pkgs) > 1:
+            from tkinter import messagebox
+            if not messagebox.askyesno(
+                    f"{verb} {len(pkgs)} packages",
+                    f"{verb} all {len(pkgs)} selected packages?\n\n"
+                    + "\n".join(pkgs[:12])
+                    + ("\n…" if len(pkgs) > 12 else "")):
+                return
+        def run():
+            for i, pkg in enumerate(pkgs, 1):
+                prefix = f"[{i}/{len(pkgs)}] " if len(pkgs) > 1 else ""
+                self._log(f"{prefix}{verb} {pkg}...")
+                result = adb(*cmd_builder(pkg), serial=self.serial, timeout=timeout)
+                self._log(result or "Done.")
+        threading.Thread(target=run, daemon=True).start()
 
     def _pkg_uninstall(self):
-        if not self._require_connection():
-            return
-        pkg = self._selected_package()
-        if not pkg:
-            return
-        def run():
-            self._log(f"Uninstalling {pkg}...")
-            result = adb("shell", "pm", "uninstall", "--user", "0", pkg, serial=self.serial)
-            self._log(result or "Done.")
-        threading.Thread(target=run, daemon=True).start()
+        self._pkg_batch("Uninstalling",
+                        lambda p: ("shell", "pm", "uninstall", "--user", "0", p),
+                        confirm=True)
 
     def _pkg_disable(self):
-        if not self._require_connection():
-            return
-        pkg = self._selected_package()
-        if not pkg:
-            return
-        def run():
-            self._log(f"Disabling {pkg}...")
-            result = adb("shell", "pm", "disable-user", "--user", "0", pkg, serial=self.serial)
-            self._log(result or "Done.")
-        threading.Thread(target=run, daemon=True).start()
+        self._pkg_batch("Disabling",
+                        lambda p: ("shell", "pm", "disable-user", "--user", "0", p))
 
     def _pkg_enable(self):
-        if not self._require_connection():
-            return
-        pkg = self._selected_package()
-        if not pkg:
-            return
-        def run():
-            self._log(f"Enabling {pkg}...")
-            result = adb("shell", "pm", "enable", pkg, serial=self.serial)
-            self._log(result or "Done.")
-        threading.Thread(target=run, daemon=True).start()
+        self._pkg_batch("Enabling", lambda p: ("shell", "pm", "enable", p))
 
     def _list_playstore_pkgs(self):
         if not self._require_connection():
@@ -2312,17 +2427,24 @@ class App(ctk.CTk):
     def _pkg_version(self):
         if not self._require_connection():
             return
-        pkg = self._selected_package()
-        if not pkg:
+        pkgs = self._selected_packages()
+        if not pkgs:
             return
         def run():
-            raw = adb_out("shell", "dumpsys", "package", pkg, serial=self.serial, timeout=15)
-            version = "unknown"
-            for line in raw.splitlines():
-                if "versionName=" in line:
-                    version = line.strip().split("versionName=")[-1].split(" ")[0]
-                    break
-            self._log(f"{pkg}  version: {version}")
+            for pkg in pkgs:
+                raw = adb_out("shell", "dumpsys", "package", pkg, serial=self.serial, timeout=15)
+                version = "unknown"
+                for line in raw.splitlines():
+                    if "versionName=" in line:
+                        version = line.strip().split("versionName=")[-1].split(" ")[0]
+                        break
+                self._log(f"{pkg}  version: {version}")
+                if pkg in self._pkg_meta:
+                    self._pkg_meta[pkg]["version"] = version
+                def refresh(p=pkg, v=version):
+                    if self.pkg_tree.exists(p):
+                        self.pkg_tree.set(p, "version", v)
+                self.after(0, refresh)
         threading.Thread(target=run, daemon=True).start()
 
     def _pkg_save_apk(self):
@@ -2331,14 +2453,16 @@ class App(ctk.CTk):
         plus any split APKs for app-bundle installs."""
         if not self._require_connection():
             return
-        pkg = self._selected_package()
-        if not pkg:
+        pkgs = self._selected_packages()
+        if not pkgs:
             return
-        dest_dir = filedialog.askdirectory(title=f"Save APK for {pkg} — choose folder")
+        title = (f"Save APK for {pkgs[0]} — choose folder" if len(pkgs) == 1
+                 else f"Save APKs for {len(pkgs)} packages — choose folder")
+        dest_dir = filedialog.askdirectory(title=title)
         if not dest_dir:
             return
 
-        def run():
+        def pull_one(pkg):
             self._log(f"Resolving APK path for {pkg}...")
             raw = adb_out("shell", "pm", "path", pkg, serial=self.serial, timeout=15)
             paths = [l.strip()[len("package:"):] for l in raw.splitlines()
@@ -2370,31 +2494,21 @@ class App(ctk.CTk):
                 else:
                     self._log(f"  Failed: {remote} — {result.strip()}")
             self._log(f"Saved {ok}/{len(targets)} APK file(s) to {dest_dir}")
+
+        def run():
+            for i, pkg in enumerate(pkgs, 1):
+                if len(pkgs) > 1:
+                    self._log(f"[{i}/{len(pkgs)}] {pkg}")
+                pull_one(pkg)
         threading.Thread(target=run, daemon=True).start()
 
     def _pkg_clear_cache(self):
-        if not self._require_connection():
-            return
-        pkg = self._selected_package()
-        if not pkg:
-            return
-        def run():
-            self._log(f"Clearing cache for {pkg}...")
-            result = adb("shell", "pm", "clear-cache", pkg, serial=self.serial)
-            self._log(result or "Cache cleared.")
-        threading.Thread(target=run, daemon=True).start()
+        self._pkg_batch("Clearing cache for",
+                        lambda p: ("shell", "pm", "clear-cache", p))
 
     def _pkg_clear_data(self):
-        if not self._require_connection():
-            return
-        pkg = self._selected_package()
-        if not pkg:
-            return
-        def run():
-            self._log(f"Clearing data for {pkg}...")
-            result = adb("shell", "pm", "clear", pkg, serial=self.serial)
-            self._log(result or "Data cleared.")
-        threading.Thread(target=run, daemon=True).start()
+        self._pkg_batch("Clearing data for",
+                        lambda p: ("shell", "pm", "clear", p), confirm=True)
 
     def _compile_speed_profile(self):
         if not self._require_connection():
@@ -2541,35 +2655,62 @@ class App(ctk.CTk):
             return
         def run():
             self._log("Checking Shizuku...")
-            check = adb("shell", "pm", "list", "packages", "moe.shizuku.privileged.api", serial=self.serial)
+            check = adb("shell", "pm", "list", "packages", SHIZUKU_PKG, serial=self.serial)
             if "moe.shizuku" in check:
                 self._log("Shizuku already installed.")
             else:
                 self._log("Installing Shizuku...")
+                # Snapshot Play Protect verifier settings and restore them
+                # afterwards — blindly writing 1 would flip devices that had
+                # verification off by choice.
+                prev = {key: adb_out("shell", "settings", "get", "global", key,
+                                     serial=self.serial).strip()
+                        for key in ("package_verifier_enable",
+                                    "package_verifier_user_consent")}
+                adb("shell", "settings", "put", "global", "package_verifier_enable", "0", serial=self.serial)
                 adb("shell", "settings", "put", "global", "package_verifier_user_consent", "-1", serial=self.serial)
-                result = adb("install", "-r", "-g", shizuku_apk, serial=self.serial, timeout=60)
-                adb("shell", "settings", "put", "global", "package_verifier_user_consent", "1", serial=self.serial)
+                result = adb("install", "-r", "-g", shizuku_apk, serial=self.serial, timeout=120)
+                for key, val in prev.items():
+                    if val and val != "null":
+                        adb("shell", "settings", "put", "global", key, val, serial=self.serial)
+                    else:
+                        adb("shell", "settings", "delete", "global", key, serial=self.serial)
                 self._log(result or "Shizuku installed.")
+                if "Success" not in (result or ""):
+                    self._log("Shizuku install failed — not starting the service.")
+                    return
             # Clicking Install should leave Shizuku running, not just installed.
             self._start_shizuku()
         threading.Thread(target=run, daemon=True).start()
 
     def _start_shizuku(self):
-        """Open Shizuku (so it writes start.sh), wait for that file, then start
-        the service over ADB. Synchronous — call from a background thread."""
+        """Start the Shizuku server over plain ADB. Synchronous — call from a
+        background thread.
+
+        Execs the native starter bundled in the APK (see SHIZUKU_START_CMD);
+        falls back to the legacy launch-app-then-start.sh flow on pre-v13
+        Shizuku, which is the only case where start.sh still exists."""
         import time
-        start_sh = "/sdcard/Android/data/moe.shizuku.privileged.api/start.sh"
-        self._log("Opening Shizuku...")
-        adb("shell", "monkey", "-p", "moe.shizuku.privileged.api", "1", serial=self.serial)
-        # First launch writes start.sh lazily; wait briefly for it to appear so
-        # the very first start doesn't fail with "No such file".
-        for _ in range(6):
-            if "No such file" not in adb("shell", "ls", start_sh, serial=self.serial):
-                break
-            time.sleep(1)
         self._log("Starting Shizuku service...")
-        result = adb("shell", "sh", start_sh, serial=self.serial)
-        self._log(result or "Shizuku service started.")
+        out = adb("shell", SHIZUKU_START_CMD, serial=self.serial, timeout=30)
+        if "NO_STARTER" in out:
+            self._log("No native starter — using legacy start.sh flow...")
+            adb("shell", "monkey", "-p", SHIZUKU_PKG,
+                "-c", "android.intent.category.LAUNCHER", "1", serial=self.serial)
+            time.sleep(2)   # first launch writes start.sh lazily
+            out = adb("shell", "sh", SHIZUKU_LEGACY_START, serial=self.serial)
+        # The starter forks the server and exits, so its stdout can look fine
+        # while nothing started (and vice versa). Trust the process table —
+        # poll briefly because the fork takes a moment to show up in ps.
+        for attempt in range(6):
+            if attempt:
+                time.sleep(0.5)
+            ps = adb_out("shell", "ps", "-A", "-o", "NAME", serial=self.serial)
+            if "shizuku_server" in ps:
+                self._log("Shizuku is running. It stops on reboot — use Launch "
+                          "Shizuku again after a restart.")
+                return
+        self._log(f"Shizuku didn't start: {out.strip() or 'no output from starter'}")
 
     def _launch_shizuku(self):
         if not self._require_connection():
@@ -2633,7 +2774,7 @@ class App(ctk.CTk):
                             self.after(0, lambda: meta["dl_btn"].configure(state="normal", text="Download"))
                             return
 
-                self._log(f"Fetching latest {name} release...")
+                self._log(f"Fetching {name} release {meta.get('tag') or '(latest)'}...")
                 if meta.get("direct_url"):
                     # Closed-source app distributed from its own site (e.g. AdGuard TV).
                     apk_url = meta["direct_url"]
@@ -2657,7 +2798,10 @@ class App(ctk.CTk):
                                        f"Release/AuroraStore-{release['tag_name']}.apk")
                 else:
                     repo = meta["repo"]
-                    api = f"https://api.github.com/repos/{repo}/releases/latest"
+                    tag = meta.get("tag")   # pinned release; latest otherwise
+                    api = (f"https://api.github.com/repos/{repo}/releases/tags/{tag}"
+                           if tag else
+                           f"https://api.github.com/repos/{repo}/releases/latest")
                     req = urllib.request.Request(api, headers={
                         "User-Agent": f"AndroidTVDesktopToolkit/{VERSION}",
                         "Accept": "application/vnd.github+json"})
@@ -2722,6 +2866,14 @@ class App(ctk.CTk):
             adb("shell", "settings", "put", "global", "package_verifier_user_consent", "1", serial=self.serial)
             adb("shell", "settings", "put", "global", "package_verifier_enable", "1", serial=self.serial)
             self._log(result or f"{name} installed.")
+            # Extra grants some apps need beyond install -g (e.g. MaTVT's
+            # WRITE_SECURE_SETTINGS, which -g cannot grant).
+            if "Success" in (result or ""):
+                for cmd in meta.get("post_install", []):
+                    self._log(f"Post-install: {' '.join(cmd[1:])}")
+                    out = adb(*cmd, serial=self.serial)
+                    if out.strip():
+                        self._log(out)
         threading.Thread(target=run, daemon=True).start()
 
     def _google_search_weather(self):

@@ -42,7 +42,7 @@ jobs:
             --noconfirm \
             --windowed \
             --name "Android TV Desktop Toolkit" \
-            --icon "assets/ATV Tools.png" \
+            --icon "assets/icon.icns" \
             --add-data "assets:assets" \
             --add-data "bin:bin" \
             --collect-all customtkinter \
