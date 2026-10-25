@@ -27,18 +27,29 @@ BIN_DIR      = SCRIPT_DIR / "bin"
 DATA_DIR     = SCRIPT_DIR / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
+_ADB_NAME = "adb.exe" if sys.platform == "win32" else "adb"
+
+def _resolve_adb(path: str) -> str:
+    """Accept either the adb executable or the folder containing it (e.g. an
+    unzipped platform-tools/). Returns the executable path, or "" if absent."""
+    if not path:
+        return ""
+    p = Path(path.strip().strip('"'))
+    if p.is_dir():
+        p = p / _ADB_NAME
+    return str(p) if p.is_file() else ""
+
 def _find_adb() -> str:
     # 1. User-saved preference from a previous session
     pref_file = DATA_DIR / "adb_path.txt"
     if pref_file.exists():
-        saved = pref_file.read_text().strip()
-        if saved and Path(saved).exists():
+        saved = _resolve_adb(pref_file.read_text())
+        if saved:
             return saved
-    # 2. Bundled in bin/
-    adb_name = "adb.exe" if sys.platform == "win32" else "adb"
-    bundled = BIN_DIR / adb_name
-    if bundled.exists():
-        return str(bundled)
+    # 2. Bundled in bin/, or an unzipped platform-tools/ next to the app
+    for bundled in (BIN_DIR / _ADB_NAME, SCRIPT_DIR / "platform-tools" / _ADB_NAME):
+        if bundled.exists():
+            return str(bundled)
     # 3. Common default install locations
     if sys.platform == "win32":
         lappdata = os.environ.get("LOCALAPPDATA", "")
@@ -102,7 +113,9 @@ def adb(*args, serial=None, timeout=10):
     cmd += list(args)
     _log_adb(cmd[1:])
     try:
+        # Device output is UTF-8; Windows' default cp1252 decode crashes on it.
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
+                           encoding="utf-8", errors="replace",
                            creationflags=_NO_WINDOW)
         return (r.stdout + r.stderr).strip()
     except subprocess.TimeoutExpired:
@@ -238,6 +251,160 @@ def _last_seen_str(ts: str) -> str:
         return f"{hours // 24}d ago"
     except Exception:
         return ""
+
+# ── system info parsing ────────────────────────────────────────────────────────
+# Everything here is readable by the unprivileged adb `shell` user — no root.
+# One batched shell call keeps Wi-Fi round trips down; each section is tagged
+# with a marker line so the output can be split back apart.
+_SYSINFO_SCRIPT = (
+    "echo @@meminfo; cat /proc/meminfo; "
+    "echo @@df; df -k 2>/dev/null; "
+    "echo @@cpuinfo; cat /proc/cpuinfo; "
+    "echo @@maxfreq; cat /sys/devices/system/cpu/cpu*/cpufreq/cpuinfo_max_freq 2>/dev/null; "
+    "echo @@uptime; cat /proc/uptime; "
+    "echo @@kernel; uname -r; "
+    "echo @@density; wm density; "
+    "echo @@ip; ip -o -4 addr show 2>/dev/null; "
+    "echo @@gles; dumpsys SurfaceFlinger 2>/dev/null | grep -m1 GLES"
+)
+
+_PROP_RE = _re.compile(r'^\[([^\]]+)\]: \[(.*)\]\s*$')
+
+def _parse_getprop(raw: str) -> dict:
+    """Parse a full `getprop` dump into {key: value}. Lines that are not
+    `[key]: [value]` (e.g. ADB daemon startup noise) are ignored."""
+    props = {}
+    for line in raw.splitlines():
+        m = _PROP_RE.match(line.strip())
+        if m:
+            props[m.group(1)] = m.group(2).strip()
+    return props
+
+def _split_sections(raw: str) -> dict:
+    """Split _SYSINFO_SCRIPT output into {section_name: text}."""
+    sections, name, buf = {}, None, []
+    for line in raw.splitlines():
+        line = line.rstrip("\r")
+        if line.startswith("@@"):
+            if name is not None:
+                sections[name] = "\n".join(buf)
+            name, buf = line[2:].strip(), []
+        elif name is not None:
+            buf.append(line)
+    if name is not None:
+        sections[name] = "\n".join(buf)
+    return sections
+
+def _fmt_bytes(n) -> str:
+    if n is None:
+        return "—"
+    n = float(n)
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024:
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n:.2f} TB"
+
+def _parse_meminfo(text: str) -> dict:
+    """Return {key: bytes} from /proc/meminfo (values are reported in kB)."""
+    mem = {}
+    for line in text.splitlines():
+        key, _, rest = line.partition(":")
+        parts = rest.split()
+        if parts and parts[0].isdigit():
+            mem[key.strip()] = int(parts[0]) * 1024
+    return mem
+
+def _parse_df(text: str) -> list:
+    """Parse `df -k` into [(mount, total, used, avail)] in bytes."""
+    rows = []
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) < 6 or not all(p.isdigit() for p in parts[1:4]):
+            continue
+        total, used, avail = (int(p) * 1024 for p in parts[1:4])
+        rows.append((" ".join(parts[5:]), total, used, avail))
+    return rows
+
+def _storage_volumes(df_rows: list):
+    """Return (internal, [(name, total, used, avail), ...]) from _parse_df rows.
+    Internal is the /data partition. External volumes (USB drives, SD cards)
+    show up as /storage/<UUID> and/or /mnt/media_rw/<UUID>; dedupe by UUID."""
+    internal, external = None, {}
+    for mount, total, used, avail in df_rows:
+        if mount == "/data":
+            internal = (total, used, avail)
+            continue
+        for prefix in ("/storage/", "/mnt/media_rw/"):
+            if mount.startswith(prefix):
+                name = mount[len(prefix):]
+                if name and "/" not in name and name not in ("emulated", "self") and total > 0:
+                    external.setdefault(name, (name, total, used, avail))
+    return internal, list(external.values())
+
+def _fmt_usage(total, used, avail) -> str:
+    pct = round(used / total * 100) if total else 0
+    return f"{_fmt_bytes(avail)} free of {_fmt_bytes(total)}  ({pct}% used)"
+
+def _parse_cpu(cpuinfo: str, maxfreq: str) -> str:
+    """Summarise core count and per-cluster max clock, e.g.
+    '8 cores (4× 2.0 GHz + 4× 1.5 GHz)'."""
+    cores = sum(1 for l in cpuinfo.splitlines() if _re.match(r'processor\s*:', l))
+    freqs = [int(f) for f in maxfreq.split() if f.isdigit()]
+    cores = cores or len(freqs)
+    if not cores:
+        return "—"
+    summary = f"{cores} core{'s' if cores != 1 else ''}"
+    if freqs:
+        clusters = {}
+        for f in freqs:
+            clusters[f] = clusters.get(f, 0) + 1
+        ordered = sorted(clusters.items(), reverse=True)
+        if len(ordered) == 1:
+            summary += f" @ {ordered[0][0] / 1_000_000:.1f} GHz"
+        else:
+            summary += " (" + " + ".join(f"{n}× {f / 1_000_000:.1f} GHz" for f, n in ordered) + ")"
+    return summary
+
+def _cpuinfo_hardware(cpuinfo: str) -> str:
+    """The 'Hardware' line older ARM kernels expose in /proc/cpuinfo."""
+    for line in cpuinfo.splitlines():
+        key, _, val = line.partition(":")
+        if key.strip() == "Hardware" and val.strip():
+            return val.strip()
+    return ""
+
+def _fmt_uptime(text: str) -> str:
+    try:
+        secs = int(float(text.split()[0]))
+    except (ValueError, IndexError):
+        return "—"
+    d, rem = divmod(secs, 86400)
+    h, rem = divmod(rem, 3600)
+    m = rem // 60
+    return f"{d}d {h}h {m}m" if d else f"{h}h {m}m"
+
+def _parse_ip_addrs(text: str) -> str:
+    """`ip -o -4 addr show` → 'wlan0 192.168.1.20, eth0 10.0.0.5' (no loopback)."""
+    addrs = []
+    for line in text.splitlines():
+        m = _re.search(r'^\d+:\s*(\S+)\s+inet\s+([\d.]+)', line)
+        if m and m.group(1) != "lo":
+            addrs.append(f"{m.group(1)} {m.group(2)}")
+    return ", ".join(addrs)
+
+def _parse_density(text: str) -> str:
+    """`wm density` → '320 dpi' (an override wins over the physical value)."""
+    physical = override = ""
+    for line in text.splitlines():
+        val = line.split(":")[-1].strip()
+        if "Override" in line:
+            override = val
+        elif "Physical" in line:
+            physical = val
+    if override and override != physical:
+        return f"{override} dpi (physical {physical})"
+    return f"{physical} dpi" if physical else "—"
 
 # ── network scan ───────────────────────────────────────────────────────────────
 def check_host(ip, port, result_queue):
@@ -670,7 +837,22 @@ class App(ctk.CTk):
         SecondaryButton(left, text="Pair (Android 11+ Wireless)", height=32,
                         text_color=PRIMARY, border_color=PRIMARY_MUTED,
                         command=self._open_pair_dialog).grid(
-                        row=10, column=0, padx=10, pady=(0, 12), sticky="ew")
+                        row=10, column=0, padx=10, pady=(0, 6), sticky="ew")
+
+        # ADB location — always reachable, even with no device connected
+        adb_row = ctk.CTkFrame(left, fg_color="transparent")
+        adb_row.grid(row=11, column=0, padx=12, pady=(0, 10), sticky="ew")
+        adb_row.grid_columnconfigure(0, weight=1)
+        self._adb_label = ctk.CTkLabel(adb_row, text="", anchor="w",
+                                       font=ctk.CTkFont(family=_FONT, size=10),
+                                       text_color=TEXT_DISABLED)
+        self._adb_label.grid(row=0, column=0, sticky="w")
+        change = ctk.CTkLabel(adb_row, text="Change…", cursor="hand2",
+                              font=ctk.CTkFont(family=_FONT, size=10, underline=True),
+                              text_color=PRIMARY)
+        change.grid(row=0, column=1, sticky="e")
+        change.bind("<Button-1>", lambda _e: self._prompt_adb_path(missing=False))
+        self._update_adb_label()
 
         self.selected_ip = StringVar(value="")
         self._device_radio_buttons = []
@@ -798,35 +980,104 @@ class App(ctk.CTk):
         tab = _scrollable(self._tab_frames["Info"])
         tab.grid_columnconfigure(0, weight=1)
 
-        card = Panel(tab)
-        card.grid(row=0, column=0, padx=6, pady=6, sticky="ew")
-        card.grid_columnconfigure(1, weight=1)
-
-        fields = [
-            ("Manufacturer", "info_manufacturer"),
-            ("Model", "info_model"),
-            ("Android Version", "info_android"),
-            ("Build / Firmware", "info_build"),
-            ("Serial Number", "info_serial"),
-            ("Resolution", "info_resolution"),
-            ("Battery", "info_battery"),
-            ("CPU ABI", "info_abi"),
-            ("DNS Mode", "info_dns"),
-            ("Package Verifier", "info_pkgverifier"),
-            ("Input Method", "info_ime"),
+        # (section title, [(label, attr, has_usage_bar), ...])
+        sections = [
+            ("Device", [
+                ("Manufacturer", "info_manufacturer", False),
+                ("Model", "info_model", False),
+                ("Model Number", "info_model_number", False),
+                ("Codename", "info_codename", False),
+                ("Serial Number", "info_serial", False),
+                ("Uptime", "info_uptime", False),
+            ]),
+            ("Memory & Storage", [
+                ("RAM", "info_ram", True),
+                ("Swap / zRAM", "info_swap", False),
+                ("Internal Storage", "info_storage", True),
+                ("External Storage", "info_ext_storage", False),
+            ]),
+            ("Hardware", [
+                ("Chipset", "info_soc", False),
+                ("CPU", "info_cpu", False),
+                ("CPU ABI", "info_abi", False),
+                ("GPU", "info_gpu", False),
+                ("Resolution", "info_resolution", False),
+                ("Display Density", "info_density", False),
+                ("Battery", "info_battery", False),
+            ]),
+            ("Software", [
+                ("Android Version", "info_android", False),
+                ("Security Patch", "info_security_patch", False),
+                ("Build / Firmware", "info_build", False),
+                ("Kernel", "info_kernel", False),
+            ]),
+            ("Network & Settings", [
+                ("IP Address", "info_ip", False),
+                ("DNS Mode", "info_dns", False),
+                ("Package Verifier", "info_pkgverifier", False),
+                ("Input Method", "info_ime", False),
+            ]),
         ]
-        for i, (label, attr) in enumerate(fields):
-            ctk.CTkLabel(card, text=label + ":", anchor="e", width=150,
-                         text_color=TEXT_MUTED,
-                         font=ctk.CTkFont(family=_FONT, size=13, weight="bold")).grid(
-                row=i, column=0, padx=(14, 6), pady=6, sticky="e")
-            var = ctk.CTkLabel(card, text="—", anchor="w",
-                               text_color=TEXT, font=ctk.CTkFont(family=_FONT, size=13))
-            var.grid(row=i, column=1, padx=6, pady=6, sticky="w")
-            setattr(self, attr, var)
+        self._info_fields = []   # [(section, label, attr)] for Copy All
+        for row, (title, fields) in enumerate(sections):
+            card = Panel(tab)
+            card.grid(row=row, column=0, padx=6, pady=6, sticky="ew")
+            card.grid_columnconfigure(1, weight=1)
+            ctk.CTkLabel(card, text=title,
+                         font=ctk.CTkFont(family=_FONT, size=12, weight="bold"),
+                         text_color=TEXT_MUTED).grid(
+                row=0, column=0, columnspan=2, padx=14, pady=(12, 2), sticky="w")
+            for i, (label, attr, has_bar) in enumerate(fields, start=1):
+                ctk.CTkLabel(card, text=label + ":", anchor="ne", width=150,
+                             text_color=TEXT_MUTED,
+                             font=ctk.CTkFont(family=_FONT, size=13, weight="bold")).grid(
+                    row=i, column=0, padx=(14, 6), pady=6, sticky="ne")
+                cell = ctk.CTkFrame(card, fg_color="transparent", corner_radius=0)
+                cell.grid(row=i, column=1, padx=6, pady=6, sticky="ew")
+                var = ctk.CTkLabel(cell, text="—", anchor="w", justify="left",
+                                   wraplength=620,
+                                   text_color=TEXT, font=ctk.CTkFont(family=_FONT, size=13))
+                var.pack(anchor="w")
+                setattr(self, attr, var)
+                if has_bar:
+                    bar = ctk.CTkProgressBar(cell, width=320, height=8,
+                                             fg_color=SURFACE_3, progress_color=PRIMARY)
+                    bar.set(0)
+                    setattr(self, attr + "_bar", bar)   # packed once a value arrives
+                self._info_fields.append((title, label, attr))
+            ctk.CTkFrame(card, fg_color="transparent", height=6).grid(row=len(fields) + 1, column=0)
 
-        SecondaryButton(card, text="Refresh Info", command=self._refresh_info, width=140).grid(
-            row=len(fields), column=0, columnspan=2, padx=14, pady=14)
+        btn_row = ctk.CTkFrame(tab, fg_color="transparent")
+        btn_row.grid(row=len(sections), column=0, pady=14)
+        SecondaryButton(btn_row, text="Refresh Info", command=self._refresh_info,
+                        width=140).pack(side="left", padx=4)
+        SecondaryButton(btn_row, text="Copy All", command=self._copy_info,
+                        width=110).pack(side="left", padx=4)
+
+    def _set_usage_bar(self, attr, fraction):
+        """Show the usage bar under an Info value; colour warns as it fills."""
+        bar = getattr(self, attr + "_bar")
+        if fraction is None:
+            bar.pack_forget()
+            return
+        color = DANGER if fraction >= 0.9 else WARNING if fraction >= 0.75 else PRIMARY
+        bar.configure(progress_color=color)
+        bar.set(fraction)
+        bar.pack(anchor="w", pady=(4, 0))
+
+    def _copy_info(self):
+        lines, current = [], None
+        for section, label, attr in self._info_fields:
+            if section != current:
+                if lines:
+                    lines.append("")
+                lines.append(f"[{section}]")
+                current = section
+            value = getattr(self, attr).cget("text").replace("\n", "; ")
+            lines.append(f"{label}: {value}")
+        self.clipboard_clear()
+        self.clipboard_append("\n".join(lines))
+        self._log("Device info copied to clipboard.")
 
     def _build_packages_tab(self):
         import tkinter.ttk as ttk
@@ -1965,18 +2216,29 @@ class App(ctk.CTk):
                     meta["verified"] = True
             self.after(0, self._populate_device_list)
 
-    def _prompt_adb_path(self):
-        global ADB
+    def _update_adb_label(self):
+        if ADB:
+            p = Path(ADB)
+            short = f"{p.parent.name}{os.sep}{p.name}" if p.parent.name else str(p)
+            self._adb_label.configure(text=f"ADB: {short}", text_color=TEXT_DISABLED)
+        else:
+            self._adb_label.configure(text="ADB: not found", text_color=DANGER)
+
+    def _prompt_adb_path(self, missing=True):
         dialog = ctk.CTkToplevel(self)
-        dialog.title("ADB Not Found")
-        dialog.geometry("500x230")
+        dialog.title("ADB Not Found" if missing else "ADB Location")
+        dialog.geometry("500x250")
         dialog.resizable(False, False)
         dialog.grab_set()
         dialog.lift()
 
-        ctk.CTkLabel(dialog, text="Android Debug Bridge (ADB) could not be found.",
+        heading = ("Android Debug Bridge (ADB) could not be found." if missing
+                   else "Choose which ADB this app uses.")
+        ctk.CTkLabel(dialog, text=heading,
                      font=ctk.CTkFont(family=_FONT, size=13, weight="bold")).pack(pady=(20, 2), padx=20, anchor="w")
-        ctk.CTkLabel(dialog, text="ADB is required to communicate with your Android TV device.",
+        ctk.CTkLabel(dialog, text="Pick adb.exe, or the platform-tools folder that contains it."
+                     if sys.platform == "win32" else
+                     "Pick the adb binary, or the platform-tools folder that contains it.",
                      text_color="gray").pack(padx=20, anchor="w")
 
         link = ctk.CTkLabel(dialog, text="  → Download Android SDK Platform Tools",
@@ -1987,9 +2249,9 @@ class App(ctk.CTk):
             "https://developer.android.com/tools/releases/platform-tools"))
 
         path_row = ctk.CTkFrame(dialog, fg_color="transparent")
-        path_row.pack(fill="x", padx=20, pady=(0, 14))
+        path_row.pack(fill="x", padx=20, pady=(0, 4))
         path_row.grid_columnconfigure(0, weight=1)
-        path_var = StringVar()
+        path_var = StringVar(value=ADB)
         _placeholder = ("Path to adb.exe  (e.g. C:\\platform-tools\\adb.exe)"
                         if sys.platform == "win32"
                         else "Path to adb  (e.g. /usr/local/bin/adb)")
@@ -2003,25 +2265,46 @@ class App(ctk.CTk):
                           else [("All files", "*")])
             p = filedialog.askopenfilename(
                 title="Locate adb",
+                initialdir=str(Path(ADB).parent) if ADB else None,
                 filetypes=_filetypes)
             if p:
                 path_var.set(p)
 
         ctk.CTkButton(path_row, text="Browse…", width=90, command=browse).grid(row=0, column=1)
 
+        error = ctk.CTkLabel(dialog, text="", text_color=DANGER,
+                             font=ctk.CTkFont(family=_FONT, size=11))
+        error.pack(padx=20, pady=(0, 4), anchor="w")
+
         def confirm():
             global ADB
-            p = path_var.get().strip()
-            if p and Path(p).exists():
-                ADB = p
-                try:
-                    (DATA_DIR / "adb_path.txt").write_text(p)
-                except Exception:
-                    pass
-                dialog.destroy()
-                self._start_adb_server()
-            else:
+            p = _resolve_adb(path_var.get())
+            if not p:
                 path_entry.configure(border_color="red")
+                error.configure(text=f"No {_ADB_NAME} found at that location.")
+                return
+            # Make sure it actually runs before switching to it.
+            try:
+                r = subprocess.run([p, "version"], capture_output=True, text=True,
+                                   timeout=10, creationflags=_NO_WINDOW)
+                ok = "Android Debug Bridge" in r.stdout
+            except Exception:
+                ok = False
+            if not ok:
+                path_entry.configure(border_color="red")
+                error.configure(text="That file didn't run as ADB.")
+                return
+            changed = p != ADB
+            ADB = p
+            try:
+                (DATA_DIR / "adb_path.txt").write_text(p)
+            except Exception:
+                pass
+            self._update_adb_label()
+            dialog.destroy()
+            if changed or missing:
+                self._log(f"Using ADB: {p}")
+                self._start_adb_server()
 
         btn_row = ctk.CTkFrame(dialog, fg_color="transparent")
         btn_row.pack(fill="x", padx=20)
@@ -2198,13 +2481,26 @@ class App(ctk.CTk):
 
     def _refresh_info_async(self):
         s = self.serial
-        manufacturer = _clean_prop(adb_out("shell", "getprop", "ro.product.manufacturer", serial=s))
-        model        = _clean_prop(adb_out("shell", "getprop", "ro.product.model", serial=s))
-        android_ver  = _clean_prop(adb_out("shell", "getprop", "ro.build.version.release", serial=s))
-        build_id     = _clean_prop(adb_out("shell", "getprop", "ro.build.display.id", serial=s))
-        serial_no    = _clean_prop(adb_out("shell", "getprop", "ro.serialno", serial=s))
-        abi          = _clean_prop(adb_out("shell", "getprop", "ro.product.cpu.abi", serial=s))
-        abilist      = _clean_prop(adb_out("shell", "getprop", "ro.product.cpu.abilist", serial=s))
+        # One full getprop dump instead of a round trip per property.
+        props        = _parse_getprop(adb_out("shell", "getprop", serial=s, timeout=15))
+        manufacturer = props.get("ro.product.manufacturer", "")
+        model        = props.get("ro.product.model", "")
+        android_ver  = props.get("ro.build.version.release", "")
+        build_id     = props.get("ro.build.display.id", "")
+        serial_no    = props.get("ro.serialno", "")
+        abi          = props.get("ro.product.cpu.abi", "")
+        abilist      = props.get("ro.product.cpu.abilist", "")
+        codename     = props.get("ro.product.device", "")
+        sdk          = props.get("ro.build.version.sdk", "")
+        sec_patch    = props.get("ro.build.version.security_patch", "")
+        # ro.product.model is often a platform name shared by a whole range
+        # (Sony: "BRAVIA 4K VH2"); the SKU carries the exact retail model, e.g.
+        # "XR-65A80J". Sony's MediaTek builds also expose a two-digit model year.
+        model_number = props.get("ro.boot.product.hardware.sku", "")
+        model_year   = props.get("ro.boot.svp.modelyear", "")
+        if model_number and model_year.isdigit():
+            year = int(model_year)
+            model_number += f"  ({2000 + year if year < 100 else year})"
         # Remember the device's supported ABIs (preferred first) so quick-install
         # can pick the matching native build instead of guessing. e.g. Chromecast
         # with Google TV reports armeabi-v7a, not arm64-v8a.
@@ -2225,9 +2521,48 @@ class App(ctk.CTk):
         batt_raw = adb_out("shell", "dumpsys", "battery", serial=s, timeout=10)
         battery = "—"
         for line in batt_raw.splitlines():
+            if "present: false" in line:
+                battery = "None (mains powered)"
+                break
             if "level:" in line:
                 battery = line.split(":")[-1].strip() + "%"
-                break
+
+        sec = _split_sections(adb_out("shell", _SYSINFO_SCRIPT, serial=s, timeout=20))
+
+        mem = _parse_meminfo(sec.get("meminfo", ""))
+        ram_total = mem.get("MemTotal")
+        ram_avail = mem.get("MemAvailable", mem.get("MemFree", 0) + mem.get("Cached", 0))
+        if ram_total:
+            ram = f"{_fmt_bytes(ram_avail)} available of {_fmt_bytes(ram_total)}"
+            ram_frac = 1 - ram_avail / ram_total
+        else:
+            ram, ram_frac = "—", None
+        swap_total = mem.get("SwapTotal", 0)
+        swap = (f"{_fmt_bytes(swap_total - mem.get('SwapFree', 0))} used of {_fmt_bytes(swap_total)}"
+                if swap_total else "None")
+
+        internal, external = _storage_volumes(_parse_df(sec.get("df", "")))
+        if internal and internal[0]:
+            storage = _fmt_usage(*internal)
+            storage_frac = internal[1] / internal[0]
+        else:
+            storage, storage_frac = "—", None
+        ext_storage = "\n".join(f"{name}: {_fmt_usage(t, u, a)}"
+                                for name, t, u, a in external) or "None mounted"
+
+        cpuinfo = sec.get("cpuinfo", "")
+        cpu = _parse_cpu(cpuinfo, sec.get("maxfreq", ""))
+        soc_model = props.get("ro.soc.model", "")          # Android 12+
+        soc = (f"{props.get('ro.soc.manufacturer', '')} {soc_model}".strip() if soc_model
+               else _cpuinfo_hardware(cpuinfo)
+               or props.get("ro.board.platform", "") or props.get("ro.hardware", ""))
+        gles = sec.get("gles", "").strip()
+        gpu = gles.split(":", 1)[-1].strip() if gles.startswith("GLES") else ""
+
+        uptime  = _fmt_uptime(sec.get("uptime", ""))
+        kernel  = sec.get("kernel", "").strip()
+        density = _parse_density(sec.get("density", ""))
+        ip_addrs = _parse_ip_addrs(sec.get("ip", "")) or s.split(":")[0]
 
         ime_raw = adb_out("shell", "dumpsys", "input_method", serial=s, timeout=15)
         ime = "—"
@@ -2255,12 +2590,29 @@ class App(ctk.CTk):
         def update():
             self.info_manufacturer.configure(text=manufacturer or "—")
             self.info_model.configure(text=model or "—")
-            self.info_android.configure(text=android_ver or "—")
+            self.info_model_number.configure(text=model_number or "—")
+            self.info_codename.configure(text=codename or "—")
+            self.info_android.configure(
+                text=f"{android_ver} (API {sdk})" if android_ver and sdk else android_ver or "—")
+            self.info_security_patch.configure(text=sec_patch or "—")
             self.info_build.configure(text=build_id or "—")
+            self.info_kernel.configure(text=kernel or "—")
             self.info_serial.configure(text=serial_no or "—")
+            self.info_uptime.configure(text=uptime)
+            self.info_ram.configure(text=ram)
+            self._set_usage_bar("info_ram", ram_frac)
+            self.info_swap.configure(text=swap)
+            self.info_storage.configure(text=storage)
+            self._set_usage_bar("info_storage", storage_frac)
+            self.info_ext_storage.configure(text=ext_storage)
+            self.info_soc.configure(text=soc or "—")
+            self.info_cpu.configure(text=cpu)
+            self.info_gpu.configure(text=gpu or "—")
             self.info_resolution.configure(text=resolution)
+            self.info_density.configure(text=density)
             self.info_battery.configure(text=battery)
-            self.info_abi.configure(text=abi or "—")
+            self.info_abi.configure(text=abilist.replace(",", ", ") if abilist else abi or "—")
+            self.info_ip.configure(text=ip_addrs)
             self.info_dns.configure(text=dns or "—")
             self.info_pkgverifier.configure(text=pkgv or "—")
             self.info_ime.configure(text=ime)
@@ -2275,7 +2627,9 @@ class App(ctk.CTk):
             self.disconnect_btn.grid_remove()
 
         self.after(0, update)
-        self._log(f"Device: {label}  |  Android: {android_ver}  |  ABI: {abi}  |  Battery: {battery}")
+        self._log(f"Device: {label}  |  Android: {android_ver}  |  ABI: {abi}  |  "
+                  f"RAM: {_fmt_bytes(ram_total)}  |  Storage free: "
+                  f"{_fmt_bytes(internal[2]) if internal else '—'}")
 
     def _require_connection(self):
         if not self.serial:

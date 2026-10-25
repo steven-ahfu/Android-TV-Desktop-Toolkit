@@ -23,3 +23,6 @@ CLAUDE.md
 # Windows
 Thumbs.db
 desktop.ini
+
+# Locally unzipped Android SDK Platform Tools
+platform-tools/
